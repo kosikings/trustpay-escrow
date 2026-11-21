@@ -13,6 +13,8 @@ import { MilestoneSubmitModal } from './MilestoneSubmitModal';
 import { ProjectChatModal } from './ProjectChatModal';
 import { ProjectCardSkeletonList, ProposalSkeletonList } from '@/components/skeletons';
 import { DownloadReceiptButton } from '@/components/DownloadReceiptButton';
+import { ProjectFilterBar } from './ProjectFilterBar';
+import { useProjectFilters } from '@/hooks/useProjectFilters';
 
 export function FreelancerDashboard() {
   const router = useRouter();
@@ -52,10 +54,6 @@ export function FreelancerDashboard() {
 
   // Milestone submission modal state
   const [submittingMilestone, setSubmittingMilestone] = useState<{ project: Project; milestone: Milestone } | null>(null);
-
-  // Search and Category filters
-  const [searchQuery, setSearchQuery] = useState('');
-  const [selectedCategory, setSelectedCategory] = useState<string>('All');
 
   // Pagination state
   const [currentPage, setCurrentPage] = useState(1);
@@ -311,13 +309,9 @@ export function FreelancerDashboard() {
     fetchMyProposals();
   }, [address]);
 
-  // Filtered projects
-  const filteredProjects = projects.filter(p => {
-    const matchesSearch = p.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
-                          p.description.toLowerCase().includes(searchQuery.toLowerCase());
-    const matchesCategory = selectedCategory === 'All' || p.category === selectedCategory;
-    return matchesSearch && matchesCategory;
-  });
+  // Multi-facet Project Filter engine with debounced search, token checkboxes, budget sliders, and URL sync
+  const filterEngine = useProjectFilters(projects);
+  const filteredProjects = filterEngine.filteredProjects;
 
   // Handle Proposal Submission via Backend API
   const handleSubmitProposal = async (e: React.FormEvent) => {
@@ -453,29 +447,13 @@ export function FreelancerDashboard() {
                   Apply for open escrows and submit your milestones.
                 </p>
               </div>
-
-              {/* Search & Category Filter */}
-              <div className="flex flex-wrap items-center gap-2">
-                <input
-                  type="text"
-                  placeholder="Search projects..."
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  className="w-full sm:w-auto px-3 py-1.5 bg-[#232326] border border-[#333338] rounded-xl text-white text-xs placeholder-[#71717a] focus:outline-none focus:border-indigo-500"
-                />
-                <select
-                  value={selectedCategory}
-                  onChange={(e) => setSelectedCategory(e.target.value)}
-                  className="w-full sm:w-auto px-3 py-1.5 bg-[#232326] border border-[#333338] rounded-xl text-white text-xs focus:outline-none focus:border-indigo-500 cursor-pointer"
-                >
-                  <option value="All">All Categories</option>
-                  <option value="Development">Development</option>
-                  <option value="Design">Design</option>
-                  <option value="Writing">Writing</option>
-                  <option value="Marketing">Marketing</option>
-                </select>
-              </div>
             </div>
+
+            {/* Multi-facet Project Filter Engine */}
+            <ProjectFilterBar
+              filtersState={filterEngine}
+              totalResultsCount={filteredProjects.length}
+            />
 
             {/* Project List */}
             {loading ? (
