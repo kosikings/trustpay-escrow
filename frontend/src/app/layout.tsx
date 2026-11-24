@@ -3,6 +3,9 @@ import { Geist, Geist_Mono } from 'next/font/google';
 import './globals.css';
 import { Toaster } from '@/components/ui/sonner';
 import { ThemeProvider } from 'next-themes';
+import { NetworkMismatchBanner } from '@/components/NetworkMismatchBanner';
+import { CommandPalette } from '@/components/CommandPalette';
+import { A11yLiveAnnouncer } from '@/components/A11yLiveAnnouncer';
 
 const geistSans = Geist({
   variable: '--font-geist-sans',
@@ -76,17 +79,32 @@ export default function RootLayout({
               try {
                 const theme = localStorage.getItem('theme');
                 const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-                const shouldUseDark = theme === 'dark' || (theme === 'system' && prefersDark) || (!theme && prefersDark);
-                document.documentElement.setAttribute('data-theme', shouldUseDark ? 'dark' : 'light');
+                let targetTheme = 'light';
+                if (theme === 'oled') {
+                  targetTheme = 'oled';
+                } else if (theme === 'dark' || (theme === 'system' && prefersDark) || (!theme && prefersDark)) {
+                  targetTheme = 'dark';
+                }
+                document.documentElement.setAttribute('data-theme', targetTheme);
               } catch (e) {}
             `,
           }}
         />
       </head>
-      <body className="min-h-full flex flex-col bg-[#09090b]" suppressHydrationWarning>
-        <ThemeProvider attribute="data-theme" defaultTheme="system" enableSystem storageKey="theme">
-          {children}
-          <Toaster />
+      <body className="min-h-full flex flex-col" suppressHydrationWarning>
+        <ThemeProvider
+          attribute="data-theme"
+          defaultTheme="system"
+          enableSystem
+          themes={['light', 'dark', 'oled', 'system']}
+          storageKey="theme"
+        >
+          <A11yLiveAnnouncer>
+            <NetworkMismatchBanner />
+            {children}
+            <Toaster />
+            <CommandPalette />
+          </A11yLiveAnnouncer>
         </ThemeProvider>
       </body>
     </html>

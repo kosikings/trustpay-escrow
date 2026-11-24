@@ -1,41 +1,88 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
+import NumberRoll from './NumberRoll';
 import { toast } from 'sonner';
 import { useRouter } from 'next/navigation';
-import { useWalletStore } from '@/store/walletStore';
+import { useWalletStore, useActiveWalletAddress, canRaiseDispute } from '@/store/walletStore';
 import { authFetch } from '@/lib/api';
 import { useEscapeKey } from '@/hooks/useEscapeKey';
 
 import { Milestone, Project, Applicant } from '@/types';
 import { ImageLightboxModal } from './ImageLightboxModal';
-import { ApplicantCard } from './ApplicantCard';
+import { ApplicantCard, type ApplicantCardData } from './ApplicantCard';
+import { FreelancerProfileModal } from './FreelancerProfileModal';
 import { ProjectChatModal } from './ProjectChatModal';
 import { ProjectCardSkeletonList } from '@/components/skeletons';
 import { SUPPORTED_TOKENS } from '@/config/tokens';
-import { useTokenBalance, getBalanceShortfall } from '@/hooks/useCreateProjectForm';
+import { useTokenBalance, useTokenBalances, getBalanceShortfall } from '@/hooks/useCreateProjectForm';
+import { TokenSelector } from '@/components/TokenSelector';
+import { usePersistentTab, usePersistentFilter } from '@/hooks/usePersistentTab';
 import { BalanceWarningBadge } from '@/components/BalanceWarningBadge';
 import { LiquidityDepthOptimizer } from '@/components/LiquidityDepthOptimizer';
+import { TokenPriceAlertWidget } from '@/components/TokenPriceAlertWidget';
+import { StarredFreelancersList } from '@/components/StarredFreelancersList';
+import { NotificationScheduleModal } from '@/components/NotificationScheduleModal';
+import { ProposalCounterOfferModal } from '@/components/ProposalCounterOfferModal';
+import { useStarredFreelancers } from '@/hooks/useStarredFreelancers';
+import type { CounterOffer } from '@/lib/counter-offer';
+import { showSorobanErrorToast } from '@/components/SorobanErrorToast';
 import { ProjectAuditLog } from '@/components/ProjectAuditLog';
 import { CalendarExportButton } from '@/components/CalendarExportButton';
 import { DownloadReceiptButton } from '@/components/DownloadReceiptButton';
+import { AccountsPayableExportModal } from '@/components/AccountsPayableExportModal';
+import { BulkMilestonePayoutManager } from '@/components/BulkMilestonePayoutManager';
+import { MilestoneCertificateButton } from '@/components/MilestoneCertificateButton';
+import { GasFeeEstimatorWidget } from '@/components/GasFeeEstimatorWidget';
+import { BlendYieldVisualizer } from '@/components/BlendYieldVisualizer';
+import { BLEND_ALLOCATION_RATIO } from '@/lib/blend-yield';
 import {
   createProjectOnChain,
   lockEscrowOnChain,
   assignFreelancerOnChain,
   getStellarExplorerUrl,
   DEFAULT_ESCROW_CONTRACT_ID,
-  showSorobanErrorToast,
+  setSorobanBaseFee,
+  fetchMultisigAccountInfo,
+  isMultisigAccount,
+  cancelUnassignedProjectOnChain,
+  raiseDisputeOnChain,
 } from '@/lib/soroban';
+import { ConfirmModal } from '@/components/ConfirmModal';
+import {
+  MultisigApprovalModal,
+  PendingSignaturesDrawer,
+} from '@/components/MultisigApprovalModal';
+import type { PendingMultisigRequest } from '@/store/walletStore';
+import { ProjectActionsDropdown } from '@/components/ProjectActionsDropdown';
 
 export interface ClientDashboardProps {
-  defaultTab?: 'projects' | 'create' | 'applicants';
+  defaultTab?: 'projects' | 'create' | 'applicants' | 'saved';
 }
 
 export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProps) {
   const router = useRouter();
-  const { address } = useWalletStore();
-  const [activeTab, setActiveTab] = useState<'projects' | 'create' | 'applicants'>(defaultTab);
+  const { address, pendingMultisig, targetNetwork } = useWalletStore();
+  const activeWalletAddress = useActiveWalletAddress();
+  const [isMultisig, setIsMultisig] = useState(false);
+  const [showPendingDrawer, setShowPendingDrawer] = useState(false);
+  const [multisigRequest, setMultisigRequest] = useState<PendingMultisigRequest | null>(null);
+  const [showMultisigModal, setShowMultisigModal] = useState(false);
+  const accountPendingMultisig = pendingMultisig.filter(
+    (r) => r.accountAddress === activeWalletAddress
+  );
+  const { starred, isStarred, toggle: toggleStarred, setNotes: setStarredNotes } =
+    useStarredFreelancers(activeWalletAddress);
+  const [activeTab, setActiveTab] = usePersistentTab<"projects" | "create" | "applicants" | "saved">({
+    key: 'client_active_tab',
+    defaultTab,
+    allowedTabs: ['projects', 'create', 'applicants', 'saved'] as const,
+    walletAddress: address,
+  });
+  // Search and token filters persisted across navigation (#177)
+  const [projectSearch, setProjectSearch] = usePersistentFilter<string>('client_projects_search', '', address);
+  const [projectToken, setProjectToken] = usePersistentFilter<string>('client_projects_token', 'All', address);
+  const [showBulkPayout, setShowBulkPayout] = useState(false);
   const [loading, setLoading] = useState(true);
   const [lightboxImage, setLightboxImage] = useState<{ url: string; name?: string } | null>(null);
 
@@ -59,6 +106,19 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
   // Projects state initialized from backend
   const [projects, setProjects] = useState<Project[]>([]);
 
+  const visibleProjects = React.useMemo(() => {
+    const query = projectSearch.trim().toLowerCase();
+    return projects.filter((project) => {
+      const matchesToken = projectToken === 'All' || (project.token || 'USDC') === projectToken;
+      const matchesSearch =
+        query.length === 0 ||
+        [project.title, project.subtitle, project.description, project.category]
+          .filter(Boolean)
+          .some((value) => String(value).toLowerCase().includes(query));
+      return matchesToken && matchesSearch;
+    });
+  }, [projects, projectSearch, projectToken]);
+
   // Pagination state
   const [currentPage, setCurrentPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
@@ -66,7 +126,9 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
 
   // Selected project for Applicants view
   const [selectedProjectForApplicants, setSelectedProjectForApplicants] = useState<Project | null>(null);
+  const [profileApplicant, setProfileApplicant] = useState<Applicant | null>(null);
   const [auditProject, setAuditProject] = useState<Project | null>(null);
+  const [reminderProject, setReminderProject] = useState<Project | null>(null);
 
   // Create Project Form State
   const [formTitle, setFormTitle] = useState('');
@@ -82,13 +144,20 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
   const [formYieldEnabled, setFormYieldEnabled] = useState(false);
   const [formFreelancerAddress, setFormFreelancerAddress] = useState('');
   const [formLockImmediately, setFormLockImmediately] = useState(false);
+  const [configuredFeeStroops, setConfiguredFeeStroops] = useState<number>(100);
   const [fundingTxMessage, setFundingTxMessage] = useState('');
-  const walletBalance = useTokenBalance(address, formToken);
+  const walletBalance = useTokenBalance(activeWalletAddress, formToken);
+  const tokenBalances = useTokenBalances(activeWalletAddress);
   const balanceShortfall = getBalanceShortfall(walletBalance.balance, formBudget === '' ? 0 : formBudget);
   const hasInsufficientBalance = walletBalance.balance !== null && balanceShortfall > 0;
   
   // Today's date string for restricting date pickers to current or future dates
   const todayStr = new Date().toISOString().split('T')[0];
+
+  // Active escrows whose principal is deposited into Blend
+  const blendYieldProjects = projects.filter(
+    (p) => p.yield_enabled && p.status !== 'completed' && p.status !== 'draft' && p.budget > 0
+  );
 
   const calculateEstimatedYield = () => {
     if (!formYieldEnabled || !formBudget || Number(formBudget) <= 0) return '0.00';
@@ -115,17 +184,111 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
   const [newMilestoneDeliverableType, setNewMilestoneDeliverableType] =
     useState('GitHub Repository');
   const [showAddMilestoneModal, setShowAddMilestoneModal] = useState(false);
+  const [showApExportModal, setShowApExportModal] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Proposal counter-offer negotiation (#150)
+  const [counterOfferTarget, setCounterOfferTarget] = useState<ApplicantCardData | null>(null);
+  const [counterOfferSubmitting, setCounterOfferSubmitting] = useState(false);
+
+  // Destructive project actions (cancel / dispute) confirmed through ConfirmModal
+  const [confirmAction, setConfirmAction] = useState<{
+    type: 'cancel' | 'dispute';
+    project: Project;
+  } | null>(null);
+
+  const getCancelBlockReason = (proj: Project): string | undefined => {
+    if (proj.status === 'completed') return 'Completed projects cannot be cancelled';
+    if (proj.status === 'disputed') return 'Resolve the open dispute first';
+    if (proj.freelancer_address) {
+      return 'A freelancer is assigned — use mutual cancellation instead';
+    }
+    return undefined;
+  };
+
+  const getDisputeBlockReason = (proj: Project): string | undefined => {
+    if (proj.project_id_onchain === undefined || proj.project_id_onchain === null) {
+      return 'No on-chain escrow to dispute yet';
+    }
+    if (proj.status === 'disputed') return 'A dispute is already open';
+    if (proj.status === 'completed') return 'Completed projects cannot be disputed';
+    if (!canRaiseDispute(proj, address)) return 'Only the client or freelancer can raise a dispute';
+    return undefined;
+  };
+
+  const handleConfirmProjectAction = async () => {
+    if (!confirmAction) return;
+    if (!address) {
+      toast.error('Please connect your wallet first.');
+      return;
+    }
+    const { type, project } = confirmAction;
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+    const hasOnChainEscrow =
+      project.project_id_onchain !== undefined && project.project_id_onchain !== null;
+    try {
+      if (type === 'cancel') {
+        if (hasOnChainEscrow) {
+          await cancelUnassignedProjectOnChain({
+            clientAddress: address,
+            projectIdOnChain: project.project_id_onchain as number | string | bigint,
+          });
+        }
+        const res = await authFetch(`${apiUrl}/api/projects/${project.id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status: 'cancelled' }),
+        });
+        if (res.ok) {
+          toast.success('Project cancelled' + (hasOnChainEscrow ? ' and escrow funds refunded.' : '.'));
+        } else {
+          toast.warning('Escrow cancelled on-chain, but the project record could not be updated.');
+        }
+      } else {
+        await raiseDisputeOnChain({
+          callerAddress: address,
+          projectIdOnChain: project.project_id_onchain as number | string | bigint,
+        });
+        await authFetch(`${apiUrl}/api/projects/${project.id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status: 'disputed' }),
+        });
+        toast.warning('Dispute raised! Funds are frozen until an arbiter rules.');
+      }
+      setConfirmAction(null);
+      await fetchBackendProjects();
+    } catch (err: any) {
+      toast.error(`${type === 'cancel' ? 'Cancellation' : 'Dispute'} failed: ${err?.message || err}`);
+    }
+  };
+
+  // Detect whether the connected enterprise account requires multiple signers (#multisig)
+  useEffect(() => {
+    let cancelled = false;
+    if (!activeWalletAddress) {
+      setIsMultisig(false);
+      return;
+    }
+    fetchMultisigAccountInfo(activeWalletAddress)
+      .then((info) => {
+        if (!cancelled) setIsMultisig(isMultisigAccount(info));
+      })
+      .catch(() => {
+        if (!cancelled) setIsMultisig(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeWalletAddress]);
 
   // Function to fetch real projects from backend
   const fetchBackendProjects = async (pageToFetch = currentPage) => {
     setLoading(true);
     try {
       const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
-      const clientParam = address ? `&client_address=${encodeURIComponent(address)}` : '';
-      const res = await authFetch(
-        `${apiUrl}/api/projects?page=${pageToFetch}&limit=6${clientParam}`
-      );
+      const clientParam = activeWalletAddress ? `&client_address=${encodeURIComponent(activeWalletAddress)}` : '';
+      const res = await authFetch(`${apiUrl}/api/projects?page=${pageToFetch}&limit=6${clientParam}`);
       if (res.ok) {
         const data = await res.json();
         if (data.projects && Array.isArray(data.projects)) {
@@ -174,6 +337,8 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
               files: p.files || [],
               attachments: p.attachments || [],
               created_at: p.created_at,
+              yield_enabled: Boolean(p.yield_enabled),
+              estimated_yield: Number(p.estimated_yield) || 0,
             };
           });
 
@@ -201,7 +366,7 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
 
   useEffect(() => {
     fetchBackendProjects();
-  }, [address]);
+  }, [address, activeWalletAddress]);
 
   // Add Milestone to Form
   const handleAddMilestone = () => {
@@ -407,6 +572,89 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
     }
   };
 
+  // Proposal counter-offer negotiation (#150)
+  const handleSubmitCounterOffer = async (offer: CounterOffer) => {
+    if (!counterOfferTarget) return;
+    if (!address) {
+      throw new Error('Please connect your client wallet first');
+    }
+
+    setCounterOfferSubmitting(true);
+    try {
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+      const res = await authFetch(`${apiUrl}/api/proposals/${counterOfferTarget.id}/counter-offer`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'counter',
+          milestones: offer.milestones,
+          note: offer.note,
+          actor_address: address,
+        }),
+      });
+
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || 'Failed to send counter-offer');
+      }
+
+      setSelectedProjectForApplicants((prev) =>
+        prev
+          ? {
+              ...prev,
+              applicants: (prev.applicants || []).map((applicant) =>
+                applicant.id === counterOfferTarget.id
+                  ? {
+                      ...applicant,
+                      counter_offer: offer,
+                      negotiation_status: 'countered' as const,
+                    }
+                  : applicant
+              ),
+            }
+          : prev
+      );
+      setCounterOfferTarget(null);
+      await fetchBackendProjects();
+    } finally {
+      setCounterOfferSubmitting(false);
+    }
+  };
+
+  const handleRespondToCounterOffer = async (
+    action: 'accept' | 'decline',
+    applicant: ApplicantCardData
+  ) => {
+    if (!address) {
+      toast.error('Please connect your client wallet first');
+      return;
+    }
+
+    setCounterOfferSubmitting(true);
+    try {
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+      const res = await authFetch(`${apiUrl}/api/proposals/${applicant.id}/counter-offer`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, actor_address: address }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || `Failed to ${action} counter-offer`);
+      }
+      toast.success(
+        action === 'accept'
+          ? 'Counter-offer accepted — agreed terms locked into the project.'
+          : 'Counter-offer declined. The original proposal remains active.'
+      );
+      await fetchBackendProjects();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Could not update the counter-offer');
+    } finally {
+      setCounterOfferSubmitting(false);
+    }
+  };
+
   // File Upload Handler with data URL & file metadata for live thumbnail previews
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
@@ -525,7 +773,7 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
         token_address: SUPPORTED_TOKENS[formToken]?.issuerOrContractAddress,
         deadline: formDeadline || new Date(Date.now() + 14 * 86400000).toISOString().split('T')[0],
         visibility: formVisibility,
-        client_address: clientAddr,
+        client_address: activeWalletAddress || clientAddr,
         freelancer_address: formFreelancerAddress.trim() || undefined,
         status: onChainProjectId ? 'in_progress' : 'draft',
         contract_id: contractId,
@@ -585,8 +833,9 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
     await handleAcceptProposal(applicant.id);
   };
 
-  useEscapeKey(() => setShowAddMilestoneModal(false), showAddMilestoneModal);
-  useEscapeKey(() => setAuditProject(null), Boolean(auditProject));
+  const totalVolume = projects.reduce((sum, p) => sum + (Number(p.budget) || 0), 0);
+  const activeEscrows = projects.filter(p => p.project_id_onchain !== null || p.status === 'open' || p.status === 'disputed').length;
+  const completedMilestones = projects.reduce((sum, p) => sum + (p.milestones?.filter(m => m.status === 'approved').length || 0), 0);
 
   return (
     <div className="w-full min-h-screen bg-[#121212] text-[#f4f4f5] font-sans p-4 sm:p-6 md:p-10 transition-colors duration-200">
@@ -610,6 +859,7 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
               {activeTab === 'projects' && 'my projects'}
               {activeTab === 'create' && 'create project'}
               {activeTab === 'applicants' && 'applicants'}
+              {activeTab === 'saved' && 'saved contractors'}
             </span>
           </div>
 
@@ -642,25 +892,140 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
                   : 'text-[#a1a1aa] hover:text-white hover:bg-[#27272a]/50'
               }`}
             >
-              Applicants ({selectedProjectForApplicants?.applicants?.length || 0})
+              Applicants (<NumberRoll value={selectedProjectForApplicants?.applicants?.length || 0} />)
+            </button>
+            <button
+              onClick={() => setActiveTab('saved')}
+              className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold transition-all ${
+                activeTab === 'saved'
+                  ? 'bg-[#27272a] text-white shadow-sm'
+                  : 'text-[#a1a1aa] hover:text-white hover:bg-[#27272a]/50'
+              }`}
+              data-testid="saved-contractors-tab"
+            >
+              Saved Contractors ({starred.length})
             </button>
           </div>
         </div>
 
+        {/* Network fee gauge and token price alerts (#256, #253) */}
+        {activeTab === 'projects' && (
+          <div className="grid gap-4 lg:grid-cols-2">
+            <GasFeeEstimatorWidget onFeeSelected={(feeStroops) => setSorobanBaseFee(feeStroops)} />
+            <TokenPriceAlertWidget />
+          </div>
+        )}
+
+        {/* Blend yield tracker for escrows routed into lending pools (#118) */}
+        {activeTab === 'projects' && blendYieldProjects.length > 0 && (
+          <BlendYieldVisualizer
+            principal={blendYieldProjects.reduce((sum, p) => sum + p.budget * BLEND_ALLOCATION_RATIO, 0)}
+            token={blendYieldProjects[0].token}
+            lockedAt={blendYieldProjects
+              .map((p) => p.created_at)
+              .filter((d): d is string => Boolean(d))
+              .sort()[0]}
+          />
+        )}
+
         {/* VIEW 1: MY PROJECTS */}
         {activeTab === 'projects' && (
           <div className="bg-[#18181b] border border-[#27272a] rounded-2xl p-6 sm:p-8 shadow-2xl transition-all duration-300">
+            {/* Dashboard Statistic Cards with Smooth NumberRoll Counter */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
+              <div className="bg-[#121214] border border-[#27272a] rounded-xl p-4">
+                <div className="text-xs text-[#a1a1aa] font-medium">Total Volume</div>
+                <div className="text-xl sm:text-2xl font-black text-white mt-1">
+                  <NumberRoll value={totalVolume} prefix="$" decimals={0} />
+                </div>
+              </div>
+              <div className="bg-[#121214] border border-[#27272a] rounded-xl p-4">
+                <div className="text-xs text-[#a1a1aa] font-medium">Active Escrows</div>
+                <div className="text-xl sm:text-2xl font-black text-blue-400 mt-1">
+                  <NumberRoll value={activeEscrows} />
+                </div>
+              </div>
+              <div className="bg-[#121214] border border-[#27272a] rounded-xl p-4">
+                <div className="text-xs text-[#a1a1aa] font-medium">Completed Milestones</div>
+                <div className="text-xl sm:text-2xl font-black text-emerald-400 mt-1">
+                  <NumberRoll value={completedMilestones} />
+                </div>
+              </div>
+            </div>
+
             <div className="flex items-center justify-between mb-6">
-              <h2 className="text-xl sm:text-2xl font-bold tracking-tight text-white">
-                {projects.length} {projects.length === 1 ? 'project' : 'projects'}
+              <h2 className="text-xl sm:text-2xl font-bold tracking-tight text-white flex items-center gap-1.5">
+                <NumberRoll value={projects.length} /> <span>{projects.length === 1 ? 'project' : 'projects'}</span>
               </h2>
-              <button
-                onClick={() => setActiveTab('create')}
-                className="inline-flex items-center space-x-2 px-4 py-2 bg-transparent hover:bg-[#27272a] text-white font-medium text-sm rounded-xl border border-[#3f3f46] transition-all hover:border-[#52525b] shadow-sm active:scale-95"
+              <div className="flex items-center gap-2">
+                {(isMultisig || accountPendingMultisig.length > 0) && (
+                  <button
+                    type="button"
+                    data-testid="pending-signatures-button"
+                    onClick={() => setShowPendingDrawer(true)}
+                    className="inline-flex items-center space-x-1.5 px-3.5 py-2 bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 font-medium text-xs rounded-xl border border-amber-500/30 transition-all"
+                    title="Transactions waiting for co-signers on your multi-sig account"
+                  >
+                    <span>✍️ Pending Signatures ({accountPendingMultisig.length})</span>
+                  </button>
+                )}
+                <button
+                  onClick={() => setShowApExportModal(true)}
+                  className="inline-flex items-center space-x-1.5 px-3.5 py-2 bg-[#232326] hover:bg-[#2d2d33] text-[#e4e4e7] font-medium text-xs rounded-xl border border-[#333338] transition-all"
+                  title="Export monthly accounts payable ledger (CSV / Excel)"
+                >
+                  <span>📊 AP Export</span>
+                </button>
+                <button
+                  type="button"
+                  data-testid="open-bulk-payout"
+                  onClick={() => setShowBulkPayout(true)}
+                  className="inline-flex items-center space-x-1.5 px-3.5 py-2 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 font-medium text-xs rounded-xl border border-emerald-500/30 transition-all"
+                  title="Approve multiple submitted milestones in one signature"
+                >
+                  <span>⚡ Bulk Payout</span>
+                </button>
+                <button
+                  onClick={() => setActiveTab('create')}
+                  className="inline-flex items-center space-x-2 px-4 py-2 bg-transparent hover:bg-[#27272a] text-white font-medium text-sm rounded-xl border border-[#3f3f46] transition-all hover:border-[#52525b] shadow-sm active:scale-95"
+                >
+                  <span className="text-lg leading-none">+</span>
+                  <span>Create project</span>
+                </button>
+              </div>
+            </div>
+
+            <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:items-center">
+              <label className="sr-only" htmlFor="client-project-search">
+                Search projects
+              </label>
+              <input
+                id="client-project-search"
+                type="search"
+                value={projectSearch}
+                onChange={(event) => setProjectSearch(event.target.value)}
+                placeholder="Search your projects…"
+                className="flex-1 rounded-xl border border-[#333338] bg-[#232326] px-3.5 py-2 text-sm text-white placeholder-[#71717a] focus:border-blue-500 focus:outline-none"
+              />
+              <label className="sr-only" htmlFor="client-project-token">
+                Filter projects by token
+              </label>
+              <select
+                id="client-project-token"
+                value={projectToken}
+                onChange={(event) => setProjectToken(event.target.value)}
+                className="rounded-xl border border-[#333338] bg-[#232326] px-3.5 py-2 text-sm text-white focus:border-blue-500 focus:outline-none"
               >
-                <span className="text-lg leading-none">+</span>
-                <span>Create project</span>
-              </button>
+                <option value="All">All Tokens</option>
+                {Object.keys(SUPPORTED_TOKENS).map((symbol) => (
+                  <option key={symbol} value={symbol}>
+                    {symbol}
+                  </option>
+                ))}
+              </select>
+              <span className="text-[11px] text-[#71717a]" data-testid="client-project-filter-count">
+                Showing {visibleProjects.length} of {projects.length}
+              </span>
             </div>
 
             {loading ? (
@@ -677,9 +1042,15 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
                   Create Your First Project
                 </button>
               </div>
+            ) : visibleProjects.length === 0 ? (
+              <div className="rounded-xl border border-[#27272a] bg-[#1c1c20]/50 py-12 text-center">
+                <p className="text-sm text-[#a1a1aa]">
+                  No projects match your search or token filter.
+                </p>
+              </div>
             ) : (
               <div className="space-y-4">
-                {projects.map((proj) => (
+                {visibleProjects.map((proj) => (
                   <div
                     key={proj.id}
                     onClick={() => {
@@ -749,17 +1120,37 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
                     </div>
 
                     <div className="self-start sm:self-center flex flex-col items-end gap-1.5">
-                      <button
-                        type="button"
-                        data-testid="client-audit-log-button"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          setAuditProject(proj);
-                        }}
-                        className="inline-flex items-center gap-1.5 rounded-lg border border-indigo-500/30 bg-indigo-500/10 px-2.5 py-1 text-[11px] font-bold text-indigo-300 transition-colors hover:bg-indigo-500/20"
-                      >
-                        <span aria-hidden="true">🔗</span> Audit Log
-                      </button>
+                      <ProjectActionsDropdown
+                        project={proj}
+                        onView={() => router.push(`/projects/${proj.id}`)}
+                        onDispute={() => setConfirmAction({ type: 'dispute', project: proj })}
+                        onCancel={() => setConfirmAction({ type: 'cancel', project: proj })}
+                        disputeDisabledReason={getDisputeBlockReason(proj)}
+                        cancelDisabledReason={getCancelBlockReason(proj)}
+                      />
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            setReminderProject(proj);
+                          }}
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 text-[11px] font-bold text-amber-300 transition-colors hover:bg-amber-500/20"
+                        >
+                          <span aria-hidden="true">⏰</span> Reminders
+                        </button>
+                        <button
+                          type="button"
+                          data-testid="client-audit-log-button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            setAuditProject(proj);
+                          }}
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-indigo-500/30 bg-indigo-500/10 px-2.5 py-1 text-[11px] font-bold text-indigo-300 transition-colors hover:bg-indigo-500/20"
+                        >
+                          <span aria-hidden="true">🔗</span> Audit Log
+                        </button>
+                      </div>
                       <CalendarExportButton project={proj} compact label="Calendar" />
                       {proj.project_id_onchain !== undefined && proj.project_id_onchain !== null && (
                         <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-indigo-500/10 text-indigo-400 border border-indigo-500/30">
@@ -784,7 +1175,10 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
                         </span>
                       )}
                       {(proj.status === 'completed' || (proj.status as string) === 'Completed') && (
-                        <DownloadReceiptButton project={proj} />
+                        <div className="flex flex-wrap items-center justify-end gap-1.5">
+                          <MilestoneCertificateButton project={proj} />
+                          <DownloadReceiptButton project={proj} />
+                        </div>
                       )}
                     </div>
                   </div>
@@ -951,28 +1345,16 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
               </div>
 
               {/* Grid: Escrow Currency, Total Budget & Overall Deadline */}
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                <div className="space-y-1.5">
-                  <label className="block text-xs sm:text-sm font-semibold text-[#e4e4e7]">
-                    Escrow Currency
-                  </label>
-                  <div className="relative">
-                    <select
-                      value={formToken}
-                      onChange={(e) => setFormToken(e.target.value as any)}
-                      className="w-full appearance-none px-4 py-3 bg-[#232326] border border-[#333338] rounded-xl text-white text-sm focus:outline-none focus:border-blue-500 transition-colors cursor-pointer"
-                    >
-                      <option value="USDC">USDC (USD Coin)</option>
-                      <option value="EURC">EURC (Euro Coin)</option>
-                      <option value="XLM">XLM (Stellar Lumens)</option>
-                      <option value="PYUSD">PYUSD (PayPal USD)</option>
-                    </select>
-                    <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-4 text-[#a1a1aa]">
-                      <svg className="w-4 h-4 fill-current" viewBox="0 0 20 20">
-                        <path d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" />
-                      </svg>
-                    </div>
-                  </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="space-y-1.5 sm:col-span-2">
+                  <TokenSelector
+                    label="Escrow Currency"
+                    value={formToken}
+                    onChange={setFormToken}
+                    balances={tokenBalances.balances}
+                    balancesLoading={tokenBalances.loading}
+                    network={targetNetwork}
+                  />
                 </div>
 
                 <div className="space-y-1.5">
@@ -1007,7 +1389,7 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
               </div>
 
               <BalanceWarningBadge
-                address={address}
+                address={activeWalletAddress}
                 balance={walletBalance.balance}
                 budget={formBudget === '' ? 0 : formBudget}
                 token={formToken}
@@ -1097,7 +1479,7 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
                       value={formFreelancerAddress}
                       onChange={(e) => setFormFreelancerAddress(e.target.value)}
                       placeholder="G..."
-                      className="w-full bg-[#121212] border border-[#27272a] rounded-xl px-3.5 py-2 text-xs font-mono text-white focus:outline-none focus:border-indigo-500"
+                      className="w-full bg-[#121212] border border-[#27272a] rounded-xl px-3.5 py-2 text-xs font-mono tracking-tight text-white focus:outline-none focus:border-indigo-500"
                     />
                   </div>
                 )}
@@ -1114,9 +1496,8 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
                 <div className="flex items-center justify-between gap-4">
                   <div className="space-y-1">
                     <div className="flex items-center space-x-2">
-                      <span className="text-sm font-bold text-white">
-                        Earn Yield with Blend Protocol
-                      </span>
+                      <span className="text-sm font-bold text-white">Earn Yield with Blend Protocol</span>
+                      <TooltipHelper termKey="blend-yield" />
                       <span className="px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wider rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
                         ~4.5% APY
                       </span>
@@ -1442,6 +1823,13 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
                 </div>
               </div>
 
+              {/* Network Gas & Soroban Fee Estimator */}
+              <div className="pt-2">
+                <GasFeeEstimatorWidget
+                  onFeeSelected={(fee) => setConfiguredFeeStroops(fee)}
+                />
+              </div>
+
               {/* Save Project Button */}
               <div className="pt-6 border-t border-[#27272a] flex flex-col sm:flex-row sm:items-center sm:justify-end gap-3">
                 {hasInsufficientBalance && (
@@ -1507,6 +1895,25 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
                     applicant={applicant}
                     onAccept={(id) => handleAcceptProposal(id)}
                     onDeny={(id) => handleDenyProposal(id)}
+                    onOpenProfile={() => setProfileApplicant(applicant)}
+                    projectBudget={selectedProjectForApplicants?.budget}
+                    tokenSymbol={selectedProjectForApplicants?.token || 'USDC'}
+                    counterOfferSubmitting={counterOfferSubmitting}
+                    onCounterOffer={(target) => setCounterOfferTarget(target)}
+                    onRespondToCounterOffer={handleRespondToCounterOffer}
+                    isStarred={isStarred(applicant.stellar_address || applicant.freelancer_address || '')}
+                    onToggleStar={(a) => {
+                      const addr = a.stellar_address || a.freelancer_address || '';
+                      if (!addr) {
+                        toast.error('This applicant has no wallet address to save.');
+                        return;
+                      }
+                      toggleStarred({
+                        address: addr,
+                        name: a.name,
+                        lastProjectTitle: selectedProjectForApplicants?.title,
+                      });
+                    }}
                     onOpenChat={(freelancerAddr) => {
                       if (!address) {
                         toast.error('Please connect your Stellar wallet first');
@@ -1531,6 +1938,28 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
                 </div>
               )}
             </div>
+          </div>
+        )}
+
+        {/* VIEW 4: SAVED CONTRACTORS (#255) */}
+        {activeTab === 'saved' && (
+          <div className="bg-[#18181b] border border-[#27272a] rounded-2xl p-6 sm:p-8 shadow-2xl space-y-6">
+            <div className="pb-4 border-b border-[#27272a]">
+              <h2 className="text-xl sm:text-2xl font-bold tracking-tight text-white">Saved Contractors</h2>
+              <p className="text-xs sm:text-sm text-[#a1a1aa] mt-1">
+                Freelancers you have starred, with private notes only you can see.
+              </p>
+            </div>
+            <StarredFreelancersList
+              starred={starred}
+              onUnstar={(addr) => toggleStarred({ address: addr })}
+              onSaveNotes={setStarredNotes}
+              onInvite={(f) => {
+                setFormFreelancerAddress(f.address);
+                setActiveTab('create');
+                toast.success(`Escrow form pre-filled for ${f.name || 'your saved contractor'}.`);
+              }}
+            />
           </div>
         )}
       </div>
@@ -1675,6 +2104,17 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
         recipientRoleLabel={chatModalState.recipientRoleLabel}
       />
 
+      <FreelancerProfileModal
+        applicant={profileApplicant}
+        onClose={() => setProfileApplicant(null)}
+      />
+
+      <NotificationScheduleModal
+        project={reminderProject}
+        isOpen={Boolean(reminderProject)}
+        onClose={() => setReminderProject(null)}
+      />
+
       {auditProject && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-black/80 p-3 backdrop-blur-md sm:p-6"
@@ -1694,6 +2134,100 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
           </div>
         </div>
       )}
+
+      {/* Proposal counter-offer negotiation modal (#150) */}
+      <ProposalCounterOfferModal
+        key={counterOfferTarget?.id || 'closed-counter-offer'}
+        isOpen={Boolean(counterOfferTarget)}
+        proposal={
+          counterOfferTarget
+            ? {
+                id: counterOfferTarget.id,
+                project_title: selectedProjectForApplicants?.title,
+                freelancer_address:
+                  counterOfferTarget.freelancer_address || counterOfferTarget.stellar_address,
+                budget: selectedProjectForApplicants?.budget,
+                counter_offer: counterOfferTarget.counter_offer,
+              }
+            : null
+        }
+        originalMilestones={(selectedProjectForApplicants?.milestones || []).map(
+          (milestone) => ({
+            milestone_index: milestone.milestone_index,
+            title: milestone.title,
+            amount: milestone.amount,
+            due_date: milestone.due_date,
+          })
+        )}
+        tokenSymbol={selectedProjectForApplicants?.token || 'USDC'}
+        isSubmitting={counterOfferSubmitting}
+        onClose={() => setCounterOfferTarget(null)}
+        onSubmit={handleSubmitCounterOffer}
+      />
+
+      {/* Destructive action confirmation (cancel escrow / raise dispute) */}
+      <ConfirmModal
+        isOpen={confirmAction !== null}
+        onClose={() => setConfirmAction(null)}
+        onConfirm={handleConfirmProjectAction}
+        level="danger"
+        title={confirmAction?.type === 'cancel' ? 'Cancel this project?' : 'Raise a dispute?'}
+        impactSummary={
+          confirmAction?.type === 'cancel'
+            ? 'This permanently cancels the project and cannot be undone.'
+            : 'This freezes all escrowed funds until an arbiter issues a ruling.'
+        }
+        description={
+          confirmAction?.type === 'cancel'
+            ? `“${confirmAction.project.title}” will be closed and any deposited escrow funds are refunded to your wallet.`
+            : `Disputing “${confirmAction?.project.title ?? ''}” locks the on-chain escrow. Only raise a dispute after trying to resolve the issue with the other party.`
+        }
+        confirmText={confirmAction?.type === 'cancel' ? 'CANCEL' : 'DISPUTE'}
+        confirmLabel={confirmAction?.type === 'cancel' ? 'Cancel project' : 'Raise dispute'}
+        cancelLabel="Keep project"
+      />
+
+      {/* Multi-sig co-signing (enterprise treasury accounts) */}
+      <PendingSignaturesDrawer
+        isOpen={showPendingDrawer}
+        onClose={() => setShowPendingDrawer(false)}
+        requests={accountPendingMultisig}
+        onSelect={(req) => {
+          setMultisigRequest(req);
+          setShowPendingDrawer(false);
+          setShowMultisigModal(true);
+        }}
+      />
+      <MultisigApprovalModal
+        isOpen={showMultisigModal}
+        onClose={() => setShowMultisigModal(false)}
+        accountAddress={activeWalletAddress}
+        request={
+          multisigRequest
+            ? pendingMultisig.find((r) => r.id === multisigRequest.id) || multisigRequest
+            : null
+        }
+        onSubmitted={() => {
+          setMultisigRequest(null);
+          void fetchBackendProjects();
+        }}
+      />
+
+      {/* Bulk milestone payout manager (#308) */}
+      <BulkMilestonePayoutManager
+        isOpen={showBulkPayout}
+        onClose={() => setShowBulkPayout(false)}
+        projects={projects}
+        balance={projectToken === 'All' ? null : tokenBalances.balances[projectToken] ?? null}
+        onComplete={() => void fetchBackendProjects()}
+      />
+
+      {/* Enterprise Accounts Payable Export Modal */}
+      <AccountsPayableExportModal
+        isOpen={showApExportModal}
+        onClose={() => setShowApExportModal(false)}
+        projects={projects}
+      />
     </div>
   );
 }

@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
+import { clearPersistedDashboardState } from '@/hooks/usePersistentTab';
 
 // Safe storage resolver that handles browser localStorage and falls back gracefully in tests/SSR
 const getStorageProvider = () => {
@@ -35,26 +36,63 @@ export interface RoleFilterState {
   category?: string;
 }
 
+export interface OrgWalletAccount {
+  id: string;
+  label: string;
+  address: string;
+  walletName?: string;
+  isPrimary?: boolean;
+  addedAt: string;
+}
+
+/** A transaction awaiting additional co-signatures from a multi-sig Stellar account. */
+export interface PendingMultisigRequest {
+  id: string;
+  /** The multi-sig (treasury) account the transaction is sourced from. */
+  accountAddress: string;
+  description: string;
+  /** Transaction envelope XDR carrying the signatures collected so far. */
+  xdr: string;
+  createdAt: string;
+}
+
 export interface WalletState {
   address: string | null;
   walletName: string | null;
+  network: string | null;
+  targetNetwork: string;
   activeRole: ActiveRole;
   isClient: boolean;
   isFreelancer: boolean;
   isArbiter: boolean;
   token: string | null;
+  orgAccounts: OrgWalletAccount[];
+  activeOrgAccountId: string | null;
   roleFilterStates: Record<ActiveRole, RoleFilterState>;
+  pendingMultisig: PendingMultisigRequest[];
   setActiveRole: (role: ActiveRole) => void;
+  /** Replaces the in-memory SEP-0010 JWT (e.g. after a silent refresh). */
+  setToken: (token: string | null) => void;
   setRoleFilter: (role: ActiveRole, filters: Partial<RoleFilterState>) => void;
   setWalletInfo: (
     address: string,
     isClient?: boolean,
     isFreelancer?: boolean,
-    walletNameOrArbiter?: string | boolean,
+    walletName?: string,
     token?: string | null,
-    isArbiter?: boolean
+    network?: string | null
   ) => void;
+  addOrgAccount: (account: { label: string; address: string; walletName?: string }) => void;
+  removeOrgAccount: (id: string) => void;
+  setActiveOrgAccount: (id: string | null) => void;
+  addPendingMultisig: (request: Omit<PendingMultisigRequest, 'id' | 'createdAt'>) => string;
+  updatePendingMultisig: (id: string, xdr: string) => void;
+  removePendingMultisig: (id: string) => void;
   disconnect: () => void;
+}
+
+function primaryOrgAccountId(address: string) {
+  return `primary:${address}`;
 }
 
 export const useWalletStore = create<WalletState>()(
@@ -62,17 +100,23 @@ export const useWalletStore = create<WalletState>()(
     (set, get) => ({
       address: null,
       walletName: null,
+      network: null,
+      targetNetwork: process.env.NEXT_PUBLIC_STELLAR_NETWORK || 'TESTNET',
       activeRole: 'client',
       isClient: true,
       isFreelancer: true,
       isArbiter: true,
       token: null,
+      orgAccounts: [],
+      activeOrgAccountId: null,
       roleFilterStates: {
         client: { status: 'all', search: '', category: 'All' },
         freelancer: { status: 'all', search: '', category: 'All' },
         arbiter: { status: 'disputed', search: '', category: 'All' },
       },
+      pendingMultisig: [],
       setActiveRole: (activeRole) => set({ activeRole }),
+      setToken: (token) => set({ token }),
       setRoleFilter: (role, filters) =>
         set((state) => ({
           roleFilterStates: {
@@ -84,20 +128,27 @@ export const useWalletStore = create<WalletState>()(
         address,
         isClient = true,
         isFreelancer = true,
-        walletNameOrArbiter = 'Freighter',
+        walletName = 'Freighter',
         token = null,
-        isArbiterParam = true
-      ) => {
-        let walletName = 'Freighter';
-        let isArbiter = true;
-        if (typeof walletNameOrArbiter === 'string') {
-          walletName = walletNameOrArbiter;
-          isArbiter = isArbiterParam;
-        } else if (typeof walletNameOrArbiter === 'boolean') {
-          isArbiter = walletNameOrArbiter;
-        }
-        set({ address, isClient, isFreelancer, isArbiter, walletName, token });
+        network = null
+      ) =>
+        set({ address, isClient, isFreelancer, walletName, token, network }),
+      addPendingMultisig: (request) => {
+        const id = `msig-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+        set((state) => ({
+          pendingMultisig: [
+            { ...request, id, createdAt: new Date().toISOString() },
+            ...state.pendingMultisig,
+          ],
+        }));
+        return id;
       },
+      updatePendingMultisig: (id, xdr) =>
+        set((state) => ({
+          pendingMultisig: state.pendingMultisig.map((r) => (r.id === id ? { ...r, xdr } : r)),
+        })),
+      removePendingMultisig: (id) =>
+        set((state) => ({ pendingMultisig: state.pendingMultisig.filter((r) => r.id !== id) })),
       disconnect: () => {
         try {
           const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
@@ -105,23 +156,42 @@ export const useWalletStore = create<WalletState>()(
         } catch {
           // ignore network error on logout
         }
+        // Drop persisted tab/filter context so the next wallet starts clean (#177)
+        clearPersistedDashboardState();
         set({
           address: null,
           walletName: null,
+          network: null,
           activeRole: 'client',
           isClient: true,
           isFreelancer: true,
           isArbiter: true,
           token: null,
+          orgAccounts: [],
+          activeOrgAccountId: null,
+          pendingMultisig: [],
         });
       },
     }),
     {
       name: 'trustpay-wallet-storage',
       storage: createJSONStorage(getStorageProvider),
+      // The SEP-0010 JWT is kept in memory only; the httpOnly cookie restores it after a reload.
+      partialize: (state) => {
+        const { token: _token, ...persisted } = state;
+        return persisted;
+      },
     }
   )
 );
+
+export function getActiveWalletAddress(state: WalletState): string | null {
+  return state.orgAccounts.find((account) => account.id === state.activeOrgAccountId)?.address || state.address;
+}
+
+export function useActiveWalletAddress(): string | null {
+  return useWalletStore((state) => getActiveWalletAddress(state));
+}
 
 /**
  * Permission Selector: Prevents clients from accidentally submitting proposals to their own escrows.

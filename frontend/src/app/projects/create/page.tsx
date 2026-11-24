@@ -18,6 +18,12 @@ export default function CreateProjectPage() {
           >
             <span>← Back to Dashboard</span>
           </Link>
+          <Link
+            href="/projects/create/retainer"
+            className="inline-flex items-center gap-1.5 rounded-xl border border-indigo-500/30 bg-indigo-500/10 px-3 py-1.5 text-xs font-semibold text-indigo-300 transition-colors hover:bg-indigo-500/20"
+          >
+            <span aria-hidden="true">🔁</span> Set up a recurring retainer
+          </Link>
         </div>
 
         <CreateProjectWizard />
