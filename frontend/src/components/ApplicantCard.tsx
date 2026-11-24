@@ -1,7 +1,10 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { toast } from 'sonner';
+import { ReputationStats, ReputationTier } from '@/types';
+import { ReputationScorecard, ReputationTierBadge } from './ReputationScorecard';
+import { deriveDeterministicReputation } from '@/lib/api';
 
 export interface ApplicantCardData {
   id: string;
@@ -15,6 +18,9 @@ export interface ApplicantCardData {
   status?: 'pending' | 'accepted' | 'denied' | 'granted' | 'rejected';
   created_at?: string;
   granted?: boolean;
+  reputation?: ReputationStats;
+  reputation_tier?: ReputationTier;
+  reputationTier?: ReputationTier;
 }
 
 export interface ApplicantCardProps {
@@ -40,6 +46,16 @@ export function ApplicantCard({
   const coverText = applicant.cover_note || applicant.pitch || 'No cover note provided.';
   const portfolioUrl = applicant.portfolio_url;
   const currentStatus = applicant.status || (applicant.granted ? 'accepted' : 'pending');
+
+  const reputationData: ReputationStats = useMemo(() => {
+    if (applicant.reputation) return applicant.reputation;
+    const tier = applicant.reputation_tier || applicant.reputationTier;
+    const base = deriveDeterministicReputation(walletAddr);
+    if (tier) {
+      return { ...base, tier };
+    }
+    return base;
+  }, [applicant.reputation, applicant.reputation_tier, applicant.reputationTier, walletAddr]);
 
   const handleCopyWallet = () => {
     if (walletAddr) {
@@ -76,7 +92,7 @@ export function ApplicantCard({
           <span className="text-[10px] font-bold uppercase tracking-wider text-[#71717a] block">
             Freelancer Stellar Address
           </span>
-          <div className="flex items-center space-x-2">
+          <div className="flex flex-wrap items-center gap-2">
             <span className="font-mono text-xs sm:text-sm text-white bg-[#232326] px-3 py-1 rounded-xl border border-[#333338] select-all break-all">
               {walletAddr}
             </span>
@@ -87,6 +103,7 @@ export function ApplicantCard({
             >
               {copied ? '✓' : '📋'}
             </button>
+            <ReputationTierBadge tier={reputationData.tier} size="sm" />
           </div>
         </div>
 
@@ -112,6 +129,13 @@ export function ApplicantCard({
           )}
         </div>
       </div>
+
+      {/* Historical Trust & Reputation Profile Scorecard */}
+      <ReputationScorecard
+        address={walletAddr}
+        stats={reputationData}
+        variant="compact"
+      />
 
       {/* Cover Note Section */}
       <div className="space-y-1.5">

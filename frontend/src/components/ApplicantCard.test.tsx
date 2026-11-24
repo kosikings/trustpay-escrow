@@ -1,7 +1,8 @@
 import { describe, it, expect, vi } from 'vitest';
 import '@testing-library/jest-dom/vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, act } from '@testing-library/react';
 import { ApplicantCard, ApplicantCardData } from './ApplicantCard';
+import { ReputationStats } from '@/types';
 
 describe('ApplicantCard Component', () => {
   const mockApplicant: ApplicantCardData = {
@@ -36,7 +37,9 @@ describe('ApplicantCard Component', () => {
     );
 
     const acceptButton = screen.getByRole('button', { name: /accept application/i });
-    fireEvent.click(acceptButton);
+    await act(async () => {
+      fireEvent.click(acceptButton);
+    });
 
     expect(onAcceptMock).toHaveBeenCalledWith('app-999');
   });
@@ -52,7 +55,9 @@ describe('ApplicantCard Component', () => {
     );
 
     const denyButton = screen.getByRole('button', { name: /deny application/i });
-    fireEvent.click(denyButton);
+    await act(async () => {
+      fireEvent.click(denyButton);
+    });
 
     expect(onDenyMock).toHaveBeenCalledWith('app-999');
   });
@@ -73,5 +78,157 @@ describe('ApplicantCard Component', () => {
     );
 
     expect(screen.getByText('Accepted')).toBeInTheDocument();
+  });
+
+  describe('Reputation Profile & Tier Badge Display on Applicant Cards', () => {
+    it('verifies badge display for Gold Tier applicant', () => {
+      const goldApplicant: ApplicantCardData = {
+        ...mockApplicant,
+        reputationTier: 'Gold',
+      };
+
+      render(
+        <ApplicantCard
+          applicant={goldApplicant}
+          onAccept={vi.fn()}
+          onDeny={vi.fn()}
+        />
+      );
+
+      const badges = screen.getAllByTestId('reputation-tier-badge');
+      expect(badges.length).toBeGreaterThan(0);
+      expect(badges[0]).toHaveTextContent('Gold Tier');
+    });
+
+    it('verifies badge display for Silver Tier applicant', () => {
+      const silverApplicant: ApplicantCardData = {
+        ...mockApplicant,
+        reputationTier: 'Silver',
+      };
+
+      render(
+        <ApplicantCard
+          applicant={silverApplicant}
+          onAccept={vi.fn()}
+          onDeny={vi.fn()}
+        />
+      );
+
+      const badges = screen.getAllByTestId('reputation-tier-badge');
+      expect(badges[0]).toHaveTextContent('Silver Tier');
+    });
+
+    it('verifies badge display for Bronze Tier applicant', () => {
+      const bronzeApplicant: ApplicantCardData = {
+        ...mockApplicant,
+        reputationTier: 'Bronze',
+      };
+
+      render(
+        <ApplicantCard
+          applicant={bronzeApplicant}
+          onAccept={vi.fn()}
+          onDeny={vi.fn()}
+        />
+      );
+
+      const badges = screen.getAllByTestId('reputation-tier-badge');
+      expect(badges[0]).toHaveTextContent('Bronze Tier');
+    });
+
+    it('verifies badge display for Verified Newcomer applicant', () => {
+      const newcomerApplicant: ApplicantCardData = {
+        ...mockApplicant,
+        reputationTier: 'Verified Newcomer',
+      };
+
+      render(
+        <ApplicantCard
+          applicant={newcomerApplicant}
+          onAccept={vi.fn()}
+          onDeny={vi.fn()}
+        />
+      );
+
+      const badges = screen.getAllByTestId('reputation-tier-badge');
+      expect(badges[0]).toHaveTextContent('Verified Newcomer');
+    });
+
+    it('renders dispute warning banner on applicant card when applicant has elevated dispute ratio (>20%)', () => {
+      const highDisputeStats: ReputationStats = {
+        address: 'GDISPUTED_APPLICANT',
+        total_escrows: 10,
+        completed_escrows: 7,
+        disputed_escrows: 3,
+        completion_rate: 70,
+        dispute_rate: 30, // 30% > 20%
+        dispute_free_ratio: 70,
+        avg_approval_time_hours: 48,
+        avg_turnaround_days: 2,
+        total_volume_usdc: 5000,
+        tier: 'Bronze',
+        has_high_dispute_warning: true,
+        historical_transactions_url:
+          'https://stellar.expert/explorer/testnet/account/GDISPUTED_APPLICANT',
+      };
+
+      const highDisputeApplicant: ApplicantCardData = {
+        ...mockApplicant,
+        stellar_address: 'GDISPUTED_APPLICANT',
+        reputation: highDisputeStats,
+      };
+
+      render(
+        <ApplicantCard
+          applicant={highDisputeApplicant}
+          onAccept={vi.fn()}
+          onDeny={vi.fn()}
+        />
+      );
+
+      expect(screen.getByTestId('dispute-warning-banner')).toBeInTheDocument();
+      expect(screen.getByText(/High Dispute Warning/i)).toBeInTheDocument();
+      expect(screen.getByText(/30%/i)).toBeInTheDocument();
+    });
+
+    it('renders on-chain explorer history link on applicant card', () => {
+      const verifiedStats: ReputationStats = {
+        address: 'GVERIFIED_APPLICANT',
+        total_escrows: 12,
+        completed_escrows: 12,
+        disputed_escrows: 0,
+        completion_rate: 100,
+        dispute_rate: 0,
+        dispute_free_ratio: 100,
+        avg_approval_time_hours: 20,
+        avg_turnaround_days: 0.8,
+        total_volume_usdc: 15000,
+        tier: 'Gold',
+        has_high_dispute_warning: false,
+        historical_transactions_url:
+          'https://stellar.expert/explorer/testnet/account/GVERIFIED_APPLICANT',
+      };
+
+      const verifiedApplicant: ApplicantCardData = {
+        ...mockApplicant,
+        stellar_address: 'GVERIFIED_APPLICANT',
+        reputation: verifiedStats,
+      };
+
+      render(
+        <ApplicantCard
+          applicant={verifiedApplicant}
+          onAccept={vi.fn()}
+          onDeny={vi.fn()}
+        />
+      );
+
+      const onChainLink = screen.getByRole('link', { name: /on-chain history/i });
+      expect(onChainLink).toBeInTheDocument();
+      expect(onChainLink).toHaveAttribute(
+        'href',
+        'https://stellar.expert/explorer/testnet/account/GVERIFIED_APPLICANT'
+      );
+    });
   });
 });
