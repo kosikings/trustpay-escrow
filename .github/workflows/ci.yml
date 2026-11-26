@@ -6,11 +6,19 @@ on:
   pull_request:
     branches: [ main, master, contributions ]
 
+permissions:
+  contents: read
+
 jobs:
   security-audit:
     name: Secret & Vulnerability Scan
     runs-on: ubuntu-latest
     steps:
+      - name: Harden Runner (Egress & Runtime Audit)
+        uses: step-security/harden-runner@v2
+        with:
+          egress-policy: audit
+
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
@@ -26,6 +34,11 @@ jobs:
     name: Soroban Smart Contracts (Rust)
     runs-on: ubuntu-latest
     steps:
+      - name: Harden Runner (Egress & Runtime Audit)
+        uses: step-security/harden-runner@v2
+        with:
+          egress-policy: audit
+
       - name: Checkout Repository
         uses: actions/checkout@v4
 
@@ -54,6 +67,11 @@ jobs:
       run:
         working-directory: backend
     steps:
+      - name: Harden Runner (Egress & Runtime Audit)
+        uses: step-security/harden-runner@v2
+        with:
+          egress-policy: audit
+
       - name: Checkout Repository
         uses: actions/checkout@v4
 
@@ -90,6 +108,11 @@ jobs:
       run:
         working-directory: frontend
     steps:
+      - name: Harden Runner (Egress & Runtime Audit)
+        uses: step-security/harden-runner@v2
+        with:
+          egress-policy: audit
+
       - name: Checkout Repository
         uses: actions/checkout@v4
 
