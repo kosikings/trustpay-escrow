@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { toast } from 'sonner';
 import { ReputationStats, ReputationTier } from '@/types';
 import { deriveDeterministicReputation } from '@/lib/api';
@@ -170,10 +170,9 @@ export function ApplicantCard({
             Freelancer Stellar Address
           </span>
           <div className="flex flex-wrap items-center gap-2">
-            <CryptoId
-              value={walletAddr}
-              className="text-xs sm:text-sm text-white bg-[#232326] px-3 py-1 rounded-xl border border-[#333338] select-all break-all"
-            />
+            <span className="font-mono text-xs sm:text-sm text-white bg-[#232326] px-3 py-1 rounded-xl border border-[#333338] select-all break-all">
+              {walletAddr}
+            </span>
             <AddressBadge address={walletAddr} showExplorerLink={true} />
             <ReputationTierBadge tier={reputationData.tier} size="sm" />
             {onToggleStar && (

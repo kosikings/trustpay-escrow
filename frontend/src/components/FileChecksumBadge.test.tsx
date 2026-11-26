@@ -1,64 +1,77 @@
 import React from 'react';
-import { describe, expect, it } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { DeliverableChecksums, FileChecksumBadge } from './FileChecksumBadge';
-import { formatAttachmentLine } from '@/lib/checksum';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { describe, it, expect, vi } from 'vitest';
+import { FileChecksumBadge } from './FileChecksumBadge';
 
-// SHA-256("abc")
-const ABC = 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad';
+describe('FileChecksumBadge', () => {
+  const testHash = 'b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9';
 
-function upload(contents: string) {
-  const input = screen.getByTestId('checksum-file-input') as HTMLInputElement;
-  fireEvent.change(input, { target: { files: [new File([contents], 'deliverable.txt')] } });
-}
-
-describe('FileChecksumBadge (#254)', () => {
-  it('shows the truncated hash next to the verify action', () => {
-    render(<FileChecksumBadge hash={ABC} />);
-    expect(screen.getByTestId('checksum-hash')).toHaveTextContent('sha256: ba78...15ad');
-    expect(screen.getByTestId('checksum-verify-button')).toHaveTextContent('Verify File Integrity');
+  it('renders truncated hash badge properly', () => {
+    render(<FileChecksumBadge hash={testHash} />);
+    const hashText = screen.getByTestId('checksum-hash-text');
+    expect(hashText.textContent).toContain('b94d27...efcde9');
   });
 
-  it('shows a green check when the downloaded file matches', async () => {
-    render(<FileChecksumBadge hash={ABC} />);
-    upload('abc');
-    expect(await screen.findByTestId('checksum-verified')).toBeInTheDocument();
-    expect(screen.queryByTestId('checksum-tampered')).not.toBeInTheDocument();
-  });
-
-  it('shows a red warning when the file was tampered with', async () => {
-    render(<FileChecksumBadge hash={ABC} />);
-    upload('abc but modified');
-    const warning = await screen.findByTestId('checksum-tampered');
-    expect(warning).toHaveAttribute('role', 'alert');
-    expect(screen.queryByTestId('checksum-verified')).not.toBeInTheDocument();
-  });
-
-  it('renders the verified and tampered states from a controlled status', () => {
-    const { rerender } = render(<FileChecksumBadge hash={ABC} status="verified" />);
-    expect(screen.getByTestId('checksum-verified')).toBeInTheDocument();
-    rerender(<FileChecksumBadge hash={ABC} status="tampered" />);
-    expect(screen.getByTestId('checksum-tampered')).toBeInTheDocument();
-  });
-
-  it('opens the file picker from the verify button', async () => {
-    render(<FileChecksumBadge hash={ABC} />);
-    const input = screen.getByTestId('checksum-file-input') as HTMLInputElement;
-    let clicked = false;
-    input.addEventListener('click', () => {
-      clicked = true;
+  it('handles copy button click', async () => {
+    const writeTextMock = vi.fn().mockResolvedValue(undefined);
+    Object.assign(navigator, {
+      clipboard: {
+        writeText: writeTextMock,
+      },
     });
-    fireEvent.click(screen.getByTestId('checksum-verify-button'));
-    await waitFor(() => expect(clicked).toBe(true));
-  });
-});
 
-describe('DeliverableChecksums', () => {
-  it('renders a badge per hashed attachment and nothing when there are none', () => {
-    const notes = `### Links & Attachments\n${formatAttachmentLine('a.pdf', '1 KB', ABC)}\n- Attachment: b.zip (2 KB)`;
-    const { container, rerender } = render(<DeliverableChecksums notes={notes} />);
-    expect(screen.getAllByTestId('file-checksum-badge')).toHaveLength(1);
-    rerender(<DeliverableChecksums notes="no attachments" />);
-    expect(container).toBeEmptyDOMElement();
+    render(<FileChecksumBadge hash={testHash} />);
+    const copyBtn = screen.getByLabelText(/copy sha-256 hash/i);
+    fireEvent.click(copyBtn);
+
+    expect(writeTextMock).toHaveBeenCalledWith(testHash);
+  });
+
+  it('toggles verification panel when clicked', () => {
+    render(<FileChecksumBadge hash={testHash} fileName="contract.pdf" />);
+
+    expect(screen.queryByTestId('verification-panel')).toBeNull();
+
+    const toggle = screen.getByTestId('verify-integrity-toggle');
+    fireEvent.click(toggle);
+
+    expect(screen.getByTestId('verification-panel')).not.toBeNull();
+    expect(screen.getByText(/contract\.pdf/i)).not.toBeNull();
+  });
+
+  it('verifies matching file and displays success confirmation', async () => {
+    render(<FileChecksumBadge hash={testHash} />);
+
+    // Open panel
+    fireEvent.click(screen.getByTestId('verify-integrity-toggle'));
+
+    // Matching content "hello world" hashes to testHash
+    const file = new File(['hello world'], 'test.txt', { type: 'text/plain' });
+    const input = screen.getByTestId('checksum-file-input');
+
+    fireEvent.change(input, { target: { files: [file] } });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('match-success-icon')).not.toBeNull();
+      expect(screen.getByText(/Checksum matches!/i)).not.toBeNull();
+    });
+  });
+
+  it('displays warning when uploaded file has mismatched hash', async () => {
+    render(<FileChecksumBadge hash={testHash} />);
+
+    // Open panel
+    fireEvent.click(screen.getByTestId('verify-integrity-toggle'));
+
+    // Altered content
+    const file = new File(['tampered altered content'], 'test.txt', { type: 'text/plain' });
+    const input = screen.getByTestId('checksum-file-input');
+
+    fireEvent.change(input, { target: { files: [file] } });
+
+    await waitFor(() => {
+      expect(screen.getByTestId('mismatch-alert-icon')).not.toBeNull();
+      expect(screen.getByText(/Security warning: Checksum mismatch!/i)).not.toBeNull();
+    });
   });
 });
