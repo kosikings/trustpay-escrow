@@ -1,23 +1,28 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import NumberRoll from './NumberRoll';
 import { toast } from 'sonner';
+import { Pagination } from './Pagination';
+import { getPagination } from '@/lib/pagination';
 import { useRouter } from 'next/navigation';
 import { useWalletStore, useActiveWalletAddress, canRaiseDispute } from '@/store/walletStore';
 import { authFetch } from '@/lib/api';
-import { useEscapeKey } from '@/hooks/useEscapeKey';
+import { AccessibleModal } from '@/components/a11y/AccessibleModal';
 
 import { Milestone, Project, Applicant } from '@/types';
 import { ImageLightboxModal } from './ImageLightboxModal';
 import { ApplicantCard, type ApplicantCardData } from './ApplicantCard';
 import { FreelancerProfileModal } from './FreelancerProfileModal';
 import { ProjectChatModal } from './ProjectChatModal';
+import { DaoProposalGeneratorModal } from './DaoProposalGeneratorModal';
+import { MilestoneBuilderCanvas } from './MilestoneBuilderCanvas';
 import { ProjectCardSkeletonList } from '@/components/skeletons';
 import { SUPPORTED_TOKENS } from '@/config/tokens';
 import { useTokenBalance, useTokenBalances, getBalanceShortfall } from '@/hooks/useCreateProjectForm';
 import { TokenSelector } from '@/components/TokenSelector';
-import { usePersistentTab, usePersistentFilter } from '@/hooks/usePersistentTab';
+import { CurrencyAmountInput } from '@/components/CurrencyAmountInput';
+import { usePersistentTab } from '@/hooks/usePersistentTab';
 import { BalanceWarningBadge } from '@/components/BalanceWarningBadge';
 import { LiquidityDepthOptimizer } from '@/components/LiquidityDepthOptimizer';
 import { TokenPriceAlertWidget } from '@/components/TokenPriceAlertWidget';
@@ -30,11 +35,11 @@ import { showSorobanErrorToast } from '@/components/SorobanErrorToast';
 import { ProjectAuditLog } from '@/components/ProjectAuditLog';
 import { CalendarExportButton } from '@/components/CalendarExportButton';
 import { DownloadReceiptButton } from '@/components/DownloadReceiptButton';
+import { ShareMilestoneButton } from '@/components/ShareableMilestoneCard';
 import { AccountsPayableExportModal } from '@/components/AccountsPayableExportModal';
-import { BulkMilestonePayoutManager } from '@/components/BulkMilestonePayoutManager';
-import { MilestoneCertificateButton } from '@/components/MilestoneCertificateButton';
 import { GasFeeEstimatorWidget } from '@/components/GasFeeEstimatorWidget';
 import { BlendYieldVisualizer } from '@/components/BlendYieldVisualizer';
+import { CurrencyConverterWidget } from '@/components/CurrencyConverterWidget';
 import { BLEND_ALLOCATION_RATIO } from '@/lib/blend-yield';
 import {
   createProjectOnChain,
@@ -47,14 +52,26 @@ import {
   isMultisigAccount,
   cancelUnassignedProjectOnChain,
   raiseDisputeOnChain,
+  buildCreateProjectArgs,
+  SorobanResourceFootprint,
 } from '@/lib/soroban';
+import { nativeToScVal, xdr, Address } from '@stellar/stellar-sdk';
+import { SorobanResourceInspectorModal } from '@/components/SorobanResourceInspectorModal';
 import { ConfirmModal } from '@/components/ConfirmModal';
 import {
   MultisigApprovalModal,
   PendingSignaturesDrawer,
 } from '@/components/MultisigApprovalModal';
 import type { PendingMultisigRequest } from '@/store/walletStore';
+import { EmptyState } from '@/components/EmptyState';
 import { ProjectActionsDropdown } from '@/components/ProjectActionsDropdown';
+import { OfflineStatusPill } from '@/components/OfflineStatusPill';
+import { useOfflineSync } from '@/hooks/useOfflineSync';
+import { BulkMilestonePayoutManager } from '@/components/BulkMilestonePayoutManager';
+import { usePersistentFilter } from '@/hooks/usePersistentTab';
+import { celebrateEscrow } from '@/lib/confetti';
+import { MilestoneCertificateButton } from '@/components/MilestoneCertificateButton';
+import { TooltipHelper } from '@/components/TooltipHelper';
 
 export interface ClientDashboardProps {
   defaultTab?: 'projects' | 'create' | 'applicants' | 'saved';
@@ -62,18 +79,18 @@ export interface ClientDashboardProps {
 
 export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProps) {
   const router = useRouter();
-  const { address, pendingMultisig, targetNetwork } = useWalletStore();
-  const activeWalletAddress = useActiveWalletAddress();
+  const { address, pendingMultisig = [], targetNetwork } = useWalletStore();
+  const activeWalletAddress = useActiveWalletAddress() || address;
   const [isMultisig, setIsMultisig] = useState(false);
   const [showPendingDrawer, setShowPendingDrawer] = useState(false);
   const [multisigRequest, setMultisigRequest] = useState<PendingMultisigRequest | null>(null);
   const [showMultisigModal, setShowMultisigModal] = useState(false);
-  const accountPendingMultisig = pendingMultisig.filter(
+  const accountPendingMultisig = (pendingMultisig || []).filter(
     (r) => r.accountAddress === activeWalletAddress
   );
   const { starred, isStarred, toggle: toggleStarred, setNotes: setStarredNotes } =
     useStarredFreelancers(activeWalletAddress);
-  const [activeTab, setActiveTab] = usePersistentTab<"projects" | "create" | "applicants" | "saved">({
+  const [activeTab, setActiveTab] = usePersistentTab<'projects' | 'create' | 'applicants' | 'saved'>({
     key: 'client_active_tab',
     defaultTab,
     allowedTabs: ['projects', 'create', 'applicants', 'saved'] as const,
@@ -121,7 +138,9 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
 
   // Pagination state
   const [currentPage, setCurrentPage] = useState(1);
-  const [totalPages, setTotalPages] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
+  const listRef = useRef<HTMLDivElement>(null);
+  const projectRequest = useRef(0);
   const [totalProjects, setTotalProjects] = useState(0);
 
   // Selected project for Applicants view
@@ -175,6 +194,39 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
 
   // Milestones list for form (initialized as empty)
   const [formMilestones, setFormMilestones] = useState<Milestone[]>([]);
+  const [showDaoProposal, setShowDaoProposal] = useState(false);
+
+  // Escrow terms handed to the DAO proposal generator, mirroring what the
+  // on-chain create flow would submit (milestones, or one tranche for the budget).
+  const daoProposalDefaults = useMemo(
+    () => ({
+      projectTitle: formTitle.trim(),
+      description: formDescription,
+      category: formCategory === 'Other' ? customCategory.trim() || 'Other' : formCategory,
+      token: formToken,
+      tokenAddress: SUPPORTED_TOKENS[formToken]?.issuerOrContractAddress ?? '',
+      freelancerAddress: formFreelancerAddress.trim(),
+      milestones:
+        formMilestones.length > 0
+          ? formMilestones.map((m) => ({ title: m.title, amount: Number(m.amount), due_date: m.due_date }))
+          : [{ title: 'Full project', amount: Number(formBudget) || 0 }],
+      yieldEnabled: formYieldEnabled,
+      deadline: formDeadline || undefined,
+    }),
+    [
+      formTitle,
+      formDescription,
+      formCategory,
+      customCategory,
+      formToken,
+      formFreelancerAddress,
+      formMilestones,
+      formBudget,
+      formYieldEnabled,
+      formDeadline,
+    ]
+  );
+  const canGenerateDaoProposal = formTitle.trim().length > 0 && Number(formBudget) > 0;
 
   const [newMilestoneTitle, setNewMilestoneTitle] = useState('');
   const [newMilestoneDescription, setNewMilestoneDescription] = useState('');
@@ -186,25 +238,12 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
   const [showAddMilestoneModal, setShowAddMilestoneModal] = useState(false);
   const [showApExportModal, setShowApExportModal] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
-
-  // Proposal counter-offer negotiation (#150)
   const [counterOfferTarget, setCounterOfferTarget] = useState<ApplicantCardData | null>(null);
   const [counterOfferSubmitting, setCounterOfferSubmitting] = useState(false);
-
-  // Destructive project actions (cancel / dispute) confirmed through ConfirmModal
   const [confirmAction, setConfirmAction] = useState<{
     type: 'cancel' | 'dispute';
     project: Project;
   } | null>(null);
-
-  const getCancelBlockReason = (proj: Project): string | undefined => {
-    if (proj.status === 'completed') return 'Completed projects cannot be cancelled';
-    if (proj.status === 'disputed') return 'Resolve the open dispute first';
-    if (proj.freelancer_address) {
-      return 'A freelancer is assigned — use mutual cancellation instead';
-    }
-    return undefined;
-  };
 
   const getDisputeBlockReason = (proj: Project): string | undefined => {
     if (proj.project_id_onchain === undefined || proj.project_id_onchain === null) {
@@ -212,7 +251,13 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
     }
     if (proj.status === 'disputed') return 'A dispute is already open';
     if (proj.status === 'completed') return 'Completed projects cannot be disputed';
-    if (!canRaiseDispute(proj, address)) return 'Only the client or freelancer can raise a dispute';
+    if (!canRaiseDispute(proj, address)) return 'Only the client or assigned freelancer can raise a dispute';
+    return undefined;
+  };
+
+  const getCancelBlockReason = (proj: Project): string | undefined => {
+    if (proj.status === 'completed') return 'Completed projects cannot be cancelled';
+    if (proj.freelancer_address) return 'Escrow already has an assigned freelancer — use Mutual Cancellation or Dispute';
     return undefined;
   };
 
@@ -222,75 +267,170 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
       toast.error('Please connect your wallet first.');
       return;
     }
-    const { type, project } = confirmAction;
-    const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
-    const hasOnChainEscrow =
-      project.project_id_onchain !== undefined && project.project_id_onchain !== null;
+    const { type, project: target } = confirmAction;
     try {
-      if (type === 'cancel') {
-        if (hasOnChainEscrow) {
-          await cancelUnassignedProjectOnChain({
-            clientAddress: address,
-            projectIdOnChain: project.project_id_onchain as number | string | bigint,
-          });
-        }
-        const res = await authFetch(`${apiUrl}/api/projects/${project.id}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ status: 'cancelled' }),
-        });
-        if (res.ok) {
-          toast.success('Project cancelled' + (hasOnChainEscrow ? ' and escrow funds refunded.' : '.'));
-        } else {
-          toast.warning('Escrow cancelled on-chain, but the project record could not be updated.');
-        }
-      } else {
+      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+      if (type === 'dispute') {
         await raiseDisputeOnChain({
           callerAddress: address,
-          projectIdOnChain: project.project_id_onchain as number | string | bigint,
+          projectIdOnChain: target.project_id_onchain as number | string | bigint,
         });
-        await authFetch(`${apiUrl}/api/projects/${project.id}`, {
+        await authFetch(`${apiUrl}/api/projects/${target.id}`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ status: 'disputed' }),
         });
         toast.warning('Dispute raised! Funds are frozen until an arbiter rules.');
+      } else {
+        if (target.project_id_onchain !== undefined && target.project_id_onchain !== null) {
+          await cancelUnassignedProjectOnChain({
+            clientAddress: address,
+            projectIdOnChain: target.project_id_onchain,
+          });
+        }
+        await authFetch(`${apiUrl}/api/projects/${target.id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status: 'cancelled' }),
+        });
+        toast.success('Project cancelled.');
       }
       setConfirmAction(null);
       await fetchBackendProjects();
     } catch (err: any) {
-      toast.error(`${type === 'cancel' ? 'Cancellation' : 'Dispute'} failed: ${err?.message || err}`);
+      toast.error(`Action failed: ${err?.message || err}`);
     }
   };
 
-  // Detect whether the connected enterprise account requires multiple signers (#multisig)
-  useEffect(() => {
-    let cancelled = false;
-    if (!activeWalletAddress) {
-      setIsMultisig(false);
-      return;
+  // Soroban Resource Inspector — pre-flight simulation state
+  const [inspectorTransaction, setInspectorTransaction] = useState<{
+    contractAddress: string;
+    functionName: string;
+    args: xdr.ScVal[];
+    description: string;
+  } | null>(null);
+  const [inspectorResolve, setInspectorResolve] = useState<
+    ((fp: SorobanResourceFootprint | null) => void) | null
+  >(null);
+
+  /**
+   * Opens the Soroban Resource Inspector modal and waits for the user to
+   * proceed or cancel.  Returns the footprint when the user clicks "Proceed
+   * to Signing", or null if they close the modal.
+   */
+  const runPreflightInspection = (tx: {
+    contractAddress: string;
+    functionName: string;
+    args: xdr.ScVal[];
+    description: string;
+  }): Promise<SorobanResourceFootprint | null> => {
+    return new Promise((resolve) => {
+      setInspectorTransaction(tx);
+      setInspectorResolve(() => resolve);
+    });
+  };
+
+  const handleInspectorClose = () => {
+    setInspectorTransaction(null);
+    if (inspectorResolve) {
+      inspectorResolve(null);
+      setInspectorResolve(null);
     }
-    fetchMultisigAccountInfo(activeWalletAddress)
-      .then((info) => {
-        if (!cancelled) setIsMultisig(isMultisigAccount(info));
-      })
-      .catch(() => {
-        if (!cancelled) setIsMultisig(false);
-      });
+  };
+
+  const handleInspectorProceed = (fp: SorobanResourceFootprint) => {
+    setInspectorTransaction(null);
+    if (inspectorResolve) {
+      inspectorResolve(fp);
+      setInspectorResolve(null);
+    }
+  };
+
+  const { isOnline, persistDraft, loadDraft, removeDraft, queueSubmission } = useOfflineSync({
+    draftKey: 'client-dashboard-project-draft',
+    draftType: 'project',
+  });
+
+  // Restore draft from IndexedDB on initial mount
+  useEffect(() => {
+    let isMounted = true;
+    async function restoreLocalDraft() {
+      const saved = await loadDraft<any>('client-dashboard-project-draft');
+      if (saved && isMounted && (saved.formTitle || saved.formBudget)) {
+        if (saved.formTitle) setFormTitle(saved.formTitle);
+        if (saved.formDescription) setFormDescription(saved.formDescription);
+        if (saved.formCategory) setFormCategory(saved.formCategory);
+        if (saved.customCategory) setCustomCategory(saved.customCategory);
+        if (saved.formProjectType) setFormProjectType(saved.formProjectType);
+        if (saved.formBudget) setFormBudget(saved.formBudget);
+        if (saved.formToken) setFormToken(saved.formToken);
+        if (saved.formDeadline) setFormDeadline(saved.formDeadline);
+        if (saved.formVisibility) setFormVisibility(saved.formVisibility);
+        if (saved.formYieldEnabled !== undefined) setFormYieldEnabled(saved.formYieldEnabled);
+        if (saved.formFreelancerAddress) setFormFreelancerAddress(saved.formFreelancerAddress);
+        if (saved.formMilestones && saved.formMilestones.length > 0) setFormMilestones(saved.formMilestones);
+        toast.info('Restored project draft from local IndexedDB storage');
+      }
+    }
+    restoreLocalDraft();
     return () => {
-      cancelled = true;
+      isMounted = false;
     };
-  }, [activeWalletAddress]);
+  }, [loadDraft]);
+
+  // Auto-save draft every 5 seconds to IndexedDB
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (formTitle || formDescription || (formBudget !== '' && Number(formBudget) > 0)) {
+        persistDraft({
+          formTitle,
+          formDescription,
+          formCategory,
+          customCategory,
+          formProjectType,
+          formBudget,
+          formToken,
+          formDeadline,
+          formVisibility,
+          formYieldEnabled,
+          formFreelancerAddress,
+          formMilestones,
+        });
+      }
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [
+    formTitle,
+    formDescription,
+    formCategory,
+    customCategory,
+    formProjectType,
+    formBudget,
+    formToken,
+    formDeadline,
+    formVisibility,
+    formYieldEnabled,
+    formFreelancerAddress,
+    formMilestones,
+    persistDraft,
+  ]);
 
   // Function to fetch real projects from backend
-  const fetchBackendProjects = async (pageToFetch = currentPage) => {
+  const fetchBackendProjects = async (pageToFetch = currentPage, size = pageSize) => {
+    const requestId = ++projectRequest.current;
     setLoading(true);
     try {
       const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
       const clientParam = activeWalletAddress ? `&client_address=${encodeURIComponent(activeWalletAddress)}` : '';
-      const res = await authFetch(`${apiUrl}/api/projects?page=${pageToFetch}&limit=6${clientParam}`);
+      const res = await authFetch(`${apiUrl}/api/projects?page=${pageToFetch}&limit=${size}${clientParam}`);
       if (res.ok) {
         const data = await res.json();
+        if (requestId !== projectRequest.current) return;
+        const nextPage = getPagination(data.pagination?.totalProjects ?? 0, pageToFetch, size).page;
+        if (data.pagination && nextPage !== pageToFetch) {
+          await fetchBackendProjects(nextPage, size);
+          return;
+        }
         if (data.projects && Array.isArray(data.projects)) {
           const mapped: Project[] = data.projects.map((p: any) => {
             const rawStatus = (p.status || 'draft').toLowerCase();
@@ -353,19 +493,19 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
         }
         if (data.pagination) {
           setCurrentPage(data.pagination.page);
-          setTotalPages(data.pagination.totalPages);
+          setPageSize(size);
           setTotalProjects(data.pagination.totalProjects);
         }
       }
     } catch (err: any) {
-      toast.error('Could not fetch projects from backend');
+      if (requestId === projectRequest.current) toast.error('Could not fetch projects from backend');
     } finally {
-      setLoading(false);
+      if (requestId === projectRequest.current) setLoading(false);
     }
   };
 
   useEffect(() => {
-    fetchBackendProjects();
+    fetchBackendProjects(1);
   }, [address, activeWalletAddress]);
 
   // Add Milestone to Form
@@ -430,6 +570,17 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
       (!project.freelancer_id || !project.freelancer_address)
     ) {
       try {
+        const assignArgs: xdr.ScVal[] = [
+          nativeToScVal(BigInt(onChainId), { type: 'u64' }),
+          Address.fromString(freelancerAddr).toScVal(),
+        ];
+        const assignFootprint = await runPreflightInspection({
+          contractAddress: DEFAULT_ESCROW_CONTRACT_ID,
+          functionName: 'assign_freelancer',
+          args: assignArgs,
+          description: `Bind Freelancer to Escrow #${onChainId}`,
+        });
+        if (!assignFootprint) return;
         toast.info(`Binding winning freelancer to on-chain escrow #${onChainId} in Freighter...`);
         await assignFreelancerOnChain({
           clientAddress: address,
@@ -453,6 +604,20 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
       const tokenConfig = SUPPORTED_TOKENS[project.token || 'USDC'] || SUPPORTED_TOKENS.USDC;
 
       try {
+        const lockArgs = buildCreateProjectArgs({
+          clientAddress: address,
+          freelancerAddress: freelancerAddr,
+          tokenAddress: project.token_address || tokenConfig.issuerOrContractAddress,
+          milestoneAmounts,
+          yieldEnabled: Boolean(project.yield_enabled),
+        });
+        const lockFootprint = await runPreflightInspection({
+          contractAddress: DEFAULT_ESCROW_CONTRACT_ID,
+          functionName: 'create_project',
+          args: lockArgs,
+          description: 'Lock Escrow on Award',
+        });
+        if (!lockFootprint) return;
         toast.info('Locking Escrow on Award: Please confirm transaction in Freighter...');
         const chainRes = await lockEscrowOnChain({
           clientAddress: address,
@@ -462,6 +627,7 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
           yieldEnabled: Boolean(project.yield_enabled),
         });
         onChainId = chainRes.onChainProjectId ? Number(chainRes.onChainProjectId) : 1;
+        celebrateEscrow();
         toast.success(`Escrow project #${onChainId} locked on Stellar!`);
       } catch (chainErr: any) {
         toast.error(`On-chain escrow initialization failed: ${chainErr.message || chainErr}`);
@@ -495,6 +661,7 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
         }
 
         toast.success('Proposal accepted & project funded on-chain!');
+        triggerCelebrationConfetti();
         setProjects((prev) =>
           prev.map((proj) => ({
             ...proj,
@@ -714,11 +881,16 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
       return;
     }
 
-    if (hasInsufficientBalance) {
-      toast.error(
-        `Insufficient ${formToken} balance. Fund your wallet with at least ${balanceShortfall.toLocaleString()} more ${formToken} before creating this escrow.`
-      );
-      return;
+    if (formMilestones.length > 0 && formBudget && Number(formBudget) > 0) {
+      const msSum = formMilestones.reduce((acc, m) => acc + (Number(m.amount) || 0), 0);
+      const budgetNum = Number(formBudget);
+      const diff = Math.abs(msSum - budgetNum);
+      if (diff > 0.05 * budgetNum && diff > 1) {
+        toast.error(
+          `Cannot submit: Milestone allocations (${msSum.toFixed(2)} ${formToken}) must equal 100% of project budget (${budgetNum} ${formToken}). Please auto-balance.`
+        );
+        return;
+      }
     }
 
     setIsSubmitting(true);
@@ -743,6 +915,23 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
             ? formMilestones.map((m) => Number(m.amount))
             : [Number(formBudget)];
 
+        const createArgs = buildCreateProjectArgs({
+          clientAddress: clientAddr,
+          freelancerAddress: formFreelancerAddress.trim(),
+          tokenAddress: SUPPORTED_TOKENS[formToken]?.issuerOrContractAddress,
+          milestoneAmounts,
+          yieldEnabled: formYieldEnabled,
+        });
+        const createFootprint = await runPreflightInspection({
+          contractAddress: DEFAULT_ESCROW_CONTRACT_ID,
+          functionName: 'create_project',
+          args: createArgs,
+          description: 'Initialize Soroban Escrow',
+        });
+        if (!createFootprint) {
+          setIsSubmitting(false);
+          return;
+        }
         toast.info('Initializing Soroban Escrow: Please confirm signature in Freighter...');
         const chainRes = await createProjectOnChain({
           clientAddress: clientAddr,
@@ -754,7 +943,9 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
 
         onChainProjectId = chainRes.onChainProjectId ? Number(chainRes.onChainProjectId) : 1;
         contractId = DEFAULT_ESCROW_CONTRACT_ID;
+        celebrateEscrow();
         toast.success(`Escrow project #${onChainProjectId} locked on Stellar!`);
+        triggerCelebrationConfetti();
       }
 
       const finalCategory =
@@ -784,6 +975,27 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
         estimated_yield: Number(calculateEstimatedYield()),
       };
 
+      if (!isOnline) {
+        await queueSubmission({
+          url: `${apiUrl}/api/projects`,
+          method: 'POST',
+          body,
+          description: `Create project: ${formTitle}`,
+        });
+        await removeDraft('client-dashboard-project-draft');
+        toast.warning(
+          'Offline: Project creation queued locally. Will automatically sync to server when connection returns!',
+          { duration: 6000 }
+        );
+        setFormTitle('');
+        setFormDescription('');
+        setFormBudget('');
+        setFormMilestones([]);
+        setIsSubmitting(false);
+        setActiveTab('projects');
+        return;
+      }
+
       const res = await authFetch(`${apiUrl}/api/projects`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -811,6 +1023,7 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
       }
 
       toast.success('Project saved successfully!');
+      await removeDraft('client-dashboard-project-draft');
       setFormTitle('');
       setFormDescription('');
       setFormBudget('');
@@ -861,6 +1074,7 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
               {activeTab === 'applicants' && 'applicants'}
               {activeTab === 'saved' && 'saved contractors'}
             </span>
+            <OfflineStatusPill className="ml-2" />
           </div>
 
           <div className="flex items-center space-x-1 bg-[#18181b] p-1 rounded-xl border border-[#27272a]">
@@ -910,9 +1124,10 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
 
         {/* Network fee gauge and token price alerts (#256, #253) */}
         {activeTab === 'projects' && (
-          <div className="grid gap-4 lg:grid-cols-2">
+          <div className="grid gap-4 lg:grid-cols-3">
             <GasFeeEstimatorWidget onFeeSelected={(feeStroops) => setSorobanBaseFee(feeStroops)} />
             <TokenPriceAlertWidget />
+            <CurrencyConverterWidget />
           </div>
         )}
 
@@ -930,7 +1145,7 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
 
         {/* VIEW 1: MY PROJECTS */}
         {activeTab === 'projects' && (
-          <div className="bg-[#18181b] border border-[#27272a] rounded-2xl p-6 sm:p-8 shadow-2xl transition-all duration-300">
+          <div ref={listRef} className="scroll-mt-6 bg-[#18181b] border border-[#27272a] rounded-2xl p-6 sm:p-8 shadow-2xl transition-all duration-300">
             {/* Dashboard Statistic Cards with Smooth NumberRoll Counter */}
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
               <div className="bg-[#121214] border border-[#27272a] rounded-xl p-4">
@@ -955,9 +1170,10 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
 
             <div className="flex items-center justify-between mb-6">
               <h2 className="text-xl sm:text-2xl font-bold tracking-tight text-white flex items-center gap-1.5">
-                <NumberRoll value={projects.length} /> <span>{projects.length === 1 ? 'project' : 'projects'}</span>
+                <NumberRoll value={totalProjects} /> <span>{totalProjects === 1 ? 'project' : 'projects'}</span>
               </h2>
               <div className="flex items-center gap-2">
+                <OfflineStatusPill />
                 {(isMultisig || accountPendingMultisig.length > 0) && (
                   <button
                     type="button"
@@ -1031,17 +1247,10 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
             {loading ? (
               <ProjectCardSkeletonList count={3} />
             ) : projects.length === 0 ? (
-              <div className="text-center py-12 bg-[#1c1c20]/50 border border-[#27272a] rounded-xl">
-                <p className="text-[#a1a1aa] text-sm mb-4">
-                  No projects created yet in the database.
-                </p>
-                <button
-                  onClick={() => setActiveTab('create')}
-                  className="px-4 py-2 bg-[#27272a] text-white font-semibold text-xs rounded-xl border border-[#3f3f46]"
-                >
-                  Create Your First Project
-                </button>
-              </div>
+<EmptyState
+                type="projects"
+                onAction={() => setActiveTab('create')}
+              />
             ) : visibleProjects.length === 0 ? (
               <div className="rounded-xl border border-[#27272a] bg-[#1c1c20]/50 py-12 text-center">
                 <p className="text-sm text-[#a1a1aa]">
@@ -1157,6 +1366,11 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
                           <span>✦</span> Soroban Escrow #{proj.project_id_onchain.toString()}
                         </span>
                       )}
+                      {proj.milestones?.some((m) => m.status === 'submitted') && (
+                        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/15 text-amber-400 border border-amber-500/30 animate-pulse">
+                          <span>⏳</span> Timelock Active
+                        </span>
+                      )}
                       {(proj.status === 'in_progress' || (proj.status as string) === 'In progress') && (
                         <span className="inline-flex items-center px-3 py-1 rounded-full text-xs font-semibold bg-[#052e16] text-[#22c55e] border border-[#14532d]">
                           In progress
@@ -1180,68 +1394,22 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
                           <DownloadReceiptButton project={proj} />
                         </div>
                       )}
+                      <ShareMilestoneButton project={proj} />
                     </div>
                   </div>
                 ))}
-
-                {/* Pagination Bar */}
-                {totalPages > 1 && (
-                  <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-4 border-t border-[#27272a]">
-                    <div className="text-xs text-[#a1a1aa]">
-                      Showing Page <span className="font-bold text-white">{currentPage}</span> of{' '}
-                      <span className="font-bold text-white">{totalPages}</span> ({totalProjects}{' '}
-                      total projects)
-                    </div>
-                    <div className="flex items-center space-x-1.5">
-                      <button
-                        onClick={() => {
-                          if (currentPage > 1) {
-                            const prev = currentPage - 1;
-                            setCurrentPage(prev);
-                            fetchBackendProjects(prev);
-                          }
-                        }}
-                        disabled={currentPage <= 1}
-                        className="px-3 py-1.5 bg-[#232326] hover:bg-[#27272a] disabled:opacity-40 disabled:cursor-not-allowed text-xs font-semibold text-[#e4e4e7] rounded-xl border border-[#333338] transition-colors"
-                      >
-                        ← Previous
-                      </button>
-
-                      {Array.from({ length: totalPages }, (_, i) => i + 1).map((pg) => (
-                        <button
-                          key={pg}
-                          onClick={() => {
-                            setCurrentPage(pg);
-                            fetchBackendProjects(pg);
-                          }}
-                          className={`px-3 py-1.5 text-xs font-bold rounded-xl transition-colors ${
-                            pg === currentPage
-                              ? 'bg-blue-600 text-white border border-blue-500'
-                              : 'bg-[#232326] hover:bg-[#27272a] text-[#a1a1aa] border border-[#333338]'
-                          }`}
-                        >
-                          {pg}
-                        </button>
-                      ))}
-
-                      <button
-                        onClick={() => {
-                          if (currentPage < totalPages) {
-                            const next = currentPage + 1;
-                            setCurrentPage(next);
-                            fetchBackendProjects(next);
-                          }
-                        }}
-                        disabled={currentPage >= totalPages}
-                        className="px-3 py-1.5 bg-[#232326] hover:bg-[#27272a] disabled:opacity-40 disabled:cursor-not-allowed text-xs font-semibold text-[#e4e4e7] rounded-xl border border-[#333338] transition-colors"
-                      >
-                        Next →
-                      </button>
-                    </div>
-                  </div>
-                )}
               </div>
             )}
+            <Pagination
+              totalItems={totalProjects}
+              page={currentPage}
+              pageSize={pageSize}
+              itemLabel="projects"
+              disabled={loading}
+              scrollTarget={listRef}
+              onPageChange={(page) => void fetchBackendProjects(page)}
+              onPageSizeChange={(size) => void fetchBackendProjects(1, size)}
+            />
           </div>
         )}
 
@@ -1361,14 +1529,14 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
                   <label className="block text-xs sm:text-sm font-semibold text-[#e4e4e7]">
                     Total budget ({formToken})
                   </label>
-                  <input
-                    type="number"
+                  <CurrencyAmountInput
+                    token={formToken}
                     value={formBudget}
-                    onChange={(e) =>
-                      setFormBudget(e.target.value === '' ? '' : Number(e.target.value))
+                    onChange={(raw) =>
+                      setFormBudget(raw === '' ? '' : Number(raw))
                     }
                     placeholder="900"
-                    className="w-full px-4 py-3 bg-[#232326] border border-[#333338] rounded-xl text-white text-sm placeholder-[#71717a] focus:outline-none focus:border-blue-500 transition-colors"
+                    label={`Total budget in ${formToken}`}
                   />
                 </div>
 
@@ -1456,8 +1624,11 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
 
                   <button
                     type="button"
+                    role="switch"
+                    aria-checked={formLockImmediately}
+                    aria-label="Lock escrow funds immediately"
                     onClick={() => setFormLockImmediately(!formLockImmediately)}
-                    className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                    className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 focus-visible:ring-offset-2 focus-visible:ring-offset-[#18181b] ${
                       formLockImmediately ? 'bg-indigo-600' : 'bg-[#3f3f46]'
                     }`}
                   >
@@ -1511,8 +1682,11 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
                   {/* Toggle Switch Button */}
                   <button
                     type="button"
+                    role="switch"
+                    aria-checked={formYieldEnabled}
+                    aria-label="Enable Blend DeFi yield"
                     onClick={() => setFormYieldEnabled(!formYieldEnabled)}
-                    className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                    className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2 focus-visible:ring-offset-[#18181b] ${
                       formYieldEnabled ? 'bg-emerald-500' : 'bg-[#3f3f46]'
                     }`}
                   >
@@ -1675,9 +1849,10 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
                                 handleRemoveAttachment(idx);
                               }}
                               className="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-red-600 hover:bg-red-500 text-white flex items-center justify-center text-[8px] font-extrabold leading-none shadow-md transition-transform hover:scale-110 z-10"
+                              aria-label="Remove attachment"
                               title="Remove attachment"
                             >
-                              ✕
+                              <span aria-hidden="true">✕</span>
                             </button>
 
                             {/* Thumbnail preview or File icon */}
@@ -1739,88 +1914,21 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
                 )}
               </div>
 
-              {/* Milestones Builder Section */}
+              {/* Milestones Builder Canvas Section */}
               <div className="pt-4 border-t border-[#27272a] space-y-4">
-                <div className="flex items-center justify-between">
-                  <h3 className="text-sm sm:text-base font-bold text-white">
-                    Milestones ({formMilestones.length})
-                  </h3>
-                  <button
-                    type="button"
-                    onClick={() => setShowAddMilestoneModal(true)}
-                    className="inline-flex items-center space-x-1 px-3 py-1.5 bg-transparent hover:bg-[#27272a] text-white font-semibold text-xs rounded-lg border border-[#3f3f46] transition-all"
-                  >
-                    <span>+ Add milestone</span>
-                  </button>
-                </div>
+                <MilestoneBuilderCanvas
+                  milestones={formMilestones as any}
+                  totalBudget={Number(formBudget) || 0}
+                  currency={formToken}
+                  onChange={(updated) => setFormMilestones(updated as any)}
+                />
+              </div>
 
-                <div className="space-y-2.5">
-                  {formMilestones.length === 0 ? (
-                    <div className="text-center py-6 bg-[#1c1c20]/50 border border-dashed border-[#333338] rounded-xl">
-                      <p className="text-xs text-[#a1a1aa]">
-                        No milestones added yet. Click &quot;+ Add milestone&quot; to define project
-                        milestones.
-                      </p>
-                    </div>
-                  ) : (
-                    formMilestones.map((m, idx) => (
-                      <div
-                        key={m.id}
-                        className="bg-[#1c1c20] border border-[#27272a] rounded-xl p-4 space-y-2 group transition-all"
-                      >
-                        <div className="flex items-center justify-between">
-                          <div className="flex items-center space-x-2">
-                            <span className="text-xs font-bold text-blue-400 bg-blue-500/10 px-2 py-0.5 rounded border border-blue-500/20">
-                              #{idx + 1}
-                            </span>
-                            <span className="text-sm font-bold text-white">{m.title}</span>
-                          </div>
-                          <div className="flex items-center space-x-3">
-                            <span className="text-sm font-extrabold text-[#22c55e]">
-                              {m.amount} {selectedProjectForApplicants?.token || 'USDC'}
-                            </span>
-                            <button
-                              type="button"
-                              onClick={() => handleRemoveMilestone(m.id)}
-                              className="text-[#71717a] hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity p-1"
-                              title="Remove milestone"
-                            >
-                              <svg
-                                className="w-4 h-4"
-                                fill="none"
-                                stroke="currentColor"
-                                viewBox="0 0 24 24"
-                              >
-                                <path
-                                  strokeLinecap="round"
-                                  strokeLinejoin="round"
-                                  strokeWidth="2"
-                                  d="M6 18L18 6M6 6l12 12"
-                                />
-                              </svg>
-                            </button>
-                          </div>
-                        </div>
-
-                        {m.description && (
-                          <p className="text-xs text-[#a1a1aa] line-clamp-2">{m.description}</p>
-                        )}
-
-                        <div className="flex flex-wrap items-center gap-2 pt-1 text-[11px] text-[#71717a]">
-                          {m.deliverable_type && (
-                            <span className="bg-[#232326] px-2 py-0.5 rounded border border-[#333338] text-[#e4e4e7]">
-                              📦 {m.deliverable_type}
-                            </span>
-                          )}
-                          <span>• Revisions: {m.revision_limit ?? 0}</span>
-                          {m.due_date && (
-                            <span>• Due: {new Date(m.due_date).toLocaleDateString()}</span>
-                          )}
-                        </div>
-                      </div>
-                    ))
-                  )}
-                </div>
+              {/* Network Gas & Soroban Fee Estimator */}
+              <div className="pt-2">
+                <GasFeeEstimatorWidget
+                  onFeeSelected={(fee) => setConfiguredFeeStroops(fee)}
+                />
               </div>
 
               {/* Network Gas & Soroban Fee Estimator */}
@@ -1838,6 +1946,15 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
                   </p>
                 )}
                 <button
+                  type="button"
+                  onClick={() => setShowDaoProposal(true)}
+                  disabled={!canGenerateDaoProposal}
+                  title={canGenerateDaoProposal ? undefined : 'Add a title and budget first'}
+                  className="px-6 py-3 bg-[#232326] hover:bg-[#2c2c30] text-white font-bold text-xs sm:text-sm rounded-xl border border-[#333338] transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  Generate DAO Proposal 🗳️
+                </button>
+                <button
                   type="submit"
                   disabled={isSubmitting || hasInsufficientBalance}
                   aria-label="Lock Funds & Create Escrow"
@@ -1852,6 +1969,11 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
                 </button>
               </div>
             </form>
+            <DaoProposalGeneratorModal
+              isOpen={showDaoProposal}
+              onClose={() => setShowDaoProposal(false)}
+              defaults={daoProposalDefaults}
+            />
           </div>
         )}
 
@@ -1965,18 +2087,24 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
       </div>
 
       {/* Modal for adding a new milestone with all backend fields */}
-      {showAddMilestoneModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-md animate-fadeIn">
-          <div className="bg-[#18181b] border border-[#3f3f46] rounded-2xl max-w-lg w-full p-6 sm:p-7 space-y-5 shadow-2xl max-h-[90vh] overflow-y-auto">
-            <div className="flex items-center justify-between pb-3 border-b border-[#27272a]">
-              <h3 className="text-lg font-bold text-white">Add New Milestone</h3>
-              <button
-                onClick={() => setShowAddMilestoneModal(false)}
-                className="text-[#a1a1aa] hover:text-white transition-colors"
-              >
-                ✕
-              </button>
-            </div>
+      <AccessibleModal
+        isOpen={showAddMilestoneModal}
+        onClose={() => setShowAddMilestoneModal(false)}
+        ariaLabel="Add New Milestone"
+        backdropClassName="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-md animate-fadeIn"
+        dialogClassName="bg-[#18181b] border border-[#3f3f46] rounded-2xl max-w-lg w-full p-6 sm:p-7 space-y-5 shadow-2xl max-h-[90vh] overflow-y-auto"
+      >
+        <div className="flex items-center justify-between pb-3 border-b border-[#27272a]">
+          <h3 className="text-lg font-bold text-white">Add New Milestone</h3>
+          <button
+            type="button"
+            onClick={() => setShowAddMilestoneModal(false)}
+            aria-label="Close add milestone modal"
+            className="text-[#a1a1aa] hover:text-white transition-colors"
+          >
+            <span aria-hidden="true">✕</span>
+          </button>
+        </div>
 
             <div className="space-y-4">
               <div className="space-y-1.5">
@@ -2008,14 +2136,16 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
                   <label className="block text-xs font-semibold text-[#e4e4e7]">
                     Amount ({formToken}) <span className="text-red-400">*</span>
                   </label>
-                  <input
-                    type="number"
+                  <CurrencyAmountInput
+                    token={formToken}
+                    min={0}
+                    step="any"
                     value={newMilestoneAmount}
-                    onChange={(e) =>
-                      setNewMilestoneAmount(e.target.value === '' ? '' : Number(e.target.value))
-                    }
+                    onValueChange={setNewMilestoneAmount}
                     placeholder="300"
-                    className="w-full px-3.5 py-2.5 bg-[#232326] border border-[#333338] rounded-xl text-white text-sm placeholder-[#71717a] focus:outline-none focus:border-blue-500"
+                    data-testid="client-milestone-amount-input"
+                    badgeTestId="client-milestone-amount-prefix"
+                    inputClassName="w-full py-2.5 pr-3.5 bg-[#232326] border border-[#333338] rounded-xl text-white text-sm placeholder-[#71717a] focus:outline-none focus:border-blue-500"
                   />
                 </div>
 
@@ -2082,9 +2212,7 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
                 Add Milestone
               </button>
             </div>
-          </div>
-        </div>
-      )}
+      </AccessibleModal>
 
       {/* Image Lightbox Modal */}
       <ImageLightboxModal
@@ -2115,25 +2243,29 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
         onClose={() => setReminderProject(null)}
       />
 
-      {auditProject && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-black/80 p-3 backdrop-blur-md sm:p-6"
-          onClick={() => setAuditProject(null)}
-        >
-          <div className="max-h-[90vh] w-full max-w-4xl overflow-y-auto" onClick={(event) => event.stopPropagation()}>
+      <AccessibleModal
+        isOpen={Boolean(auditProject)}
+        onClose={() => setAuditProject(null)}
+        ariaLabel={auditProject ? `Audit log for ${auditProject.title}` : 'Project audit log'}
+        backdropClassName="fixed inset-0 z-50 flex items-center justify-center overflow-y-auto bg-black/80 p-3 backdrop-blur-md sm:p-6"
+        dialogClassName="max-h-[90vh] w-full max-w-4xl overflow-y-auto"
+      >
+        {auditProject && (
+          <>
             <div className="mb-3 flex justify-end">
               <button
                 type="button"
                 onClick={() => setAuditProject(null)}
+                aria-label="Close audit log"
                 className="rounded-xl border border-slate-700 bg-slate-900 px-4 py-2 text-xs font-bold text-slate-300 hover:text-white"
               >
-                Close Audit Log ✕
+                Close Audit Log <span aria-hidden="true">✕</span>
               </button>
             </div>
             <ProjectAuditLog project={auditProject} />
-          </div>
-        </div>
-      )}
+          </>
+        )}
+      </AccessibleModal>
 
       {/* Proposal counter-offer negotiation modal (#150) */}
       <ProposalCounterOfferModal
@@ -2204,7 +2336,7 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
         accountAddress={activeWalletAddress}
         request={
           multisigRequest
-            ? pendingMultisig.find((r) => r.id === multisigRequest.id) || multisigRequest
+            ? (pendingMultisig || []).find((r) => r.id === multisigRequest.id) || multisigRequest
             : null
         }
         onSubmitted={() => {
@@ -2227,6 +2359,13 @@ export function ClientDashboard({ defaultTab = 'projects' }: ClientDashboardProp
         isOpen={showApExportModal}
         onClose={() => setShowApExportModal(false)}
         projects={projects}
+      />
+
+      {/* Soroban Resource Inspector — pre-flight simulation before wallet signing */}
+      <SorobanResourceInspectorModal
+        transaction={inspectorTransaction}
+        onClose={handleInspectorClose}
+        onProceed={handleInspectorProceed}
       />
     </div>
   );
