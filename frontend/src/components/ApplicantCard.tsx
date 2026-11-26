@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { toast } from 'sonner';
 import { CryptoId } from '@/components/ui/CryptoId';
 import { AddressBadge } from './AddressBadge';
@@ -153,11 +153,10 @@ export function ApplicantCard({
           <span className="text-[10px] font-bold uppercase tracking-wider text-[#71717a] block">
             Freelancer Stellar Address
           </span>
-          <div className="flex items-center space-x-2">
-            <CryptoId
-              value={walletAddr}
-              className="sm:text-sm text-white bg-[#232326] px-3 py-1 rounded-xl border border-[#333338] select-all break-all"
-            />
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="font-mono text-xs sm:text-sm text-white bg-[#232326] px-3 py-1 rounded-xl border border-[#333338] select-all break-all">
+              {walletAddr}
+            </span>
             <AddressBadge address={walletAddr} showExplorerLink={true} />
             <AddressBadge value={walletAddr} label="Copy Wallet Address" />
             {onToggleStar && (
@@ -213,6 +212,13 @@ export function ApplicantCard({
           )}
         </div>
       </div>
+
+      {/* Historical Trust & Reputation Profile Scorecard */}
+      <ReputationScorecard
+        address={walletAddr}
+        stats={reputationData}
+        variant="compact"
+      />
 
       {/* Cover Note Section */}
       <div className="space-y-1.5">

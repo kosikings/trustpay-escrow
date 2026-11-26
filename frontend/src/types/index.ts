@@ -84,6 +84,26 @@ export interface RetainerConfig {
   completedCycles?: number;
 }
 
+export type ReputationTier = 'Gold' | 'Silver' | 'Bronze' | 'Verified Newcomer';
+
+export interface ReputationStats {
+  address: string;
+  total_escrows: number;
+  completed_escrows: number;
+  disputed_escrows: number;
+  completion_rate: number; // e.g. 95 (percentage 0-100)
+  dispute_rate: number; // dispute frequency percentage 0-100
+  dispute_free_ratio: number; // dispute-free percentage 0-100
+  avg_approval_time_hours: number; // average approval/turnaround time in hours
+  avg_turnaround_days?: number; // average turnaround time in days
+  total_volume_usdc: number; // total volume settled in USDC
+  tier: ReputationTier;
+  has_high_dispute_warning: boolean; // true if dispute_rate > 20%
+  historical_transactions_url?: string; // on-chain explorer link (Stellar Expert)
+  contract_interactions_count?: number;
+  last_settlement_at?: string;
+}
+
 export interface Applicant {
   id: string;
   project_id?: string;

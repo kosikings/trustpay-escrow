@@ -1,7 +1,8 @@
 import { describe, it, expect, vi } from 'vitest';
 import '@testing-library/jest-dom/vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, act } from '@testing-library/react';
 import { ApplicantCard, ApplicantCardData } from './ApplicantCard';
+import { ReputationStats } from '@/types';
 
 describe('ApplicantCard Component', () => {
   const mockApplicant: ApplicantCardData = {
@@ -50,7 +51,9 @@ describe('ApplicantCard Component', () => {
     );
 
     const acceptButton = screen.getByRole('button', { name: /accept application/i });
-    fireEvent.click(acceptButton);
+    await act(async () => {
+      fireEvent.click(acceptButton);
+    });
 
     expect(onAcceptMock).toHaveBeenCalledWith('app-999');
   });
@@ -66,7 +69,9 @@ describe('ApplicantCard Component', () => {
     );
 
     const denyButton = screen.getByRole('button', { name: /deny application/i });
-    fireEvent.click(denyButton);
+    await act(async () => {
+      fireEvent.click(denyButton);
+    });
 
     expect(onDenyMock).toHaveBeenCalledWith('app-999');
   });
